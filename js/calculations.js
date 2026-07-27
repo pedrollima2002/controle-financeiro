@@ -1,13 +1,16 @@
+import { normalizeText } from "./utils.js";
+
 export function sumCents(records, key = "amountCents") {
   return records.reduce((total, record) => total + (Number.isSafeInteger(record[key]) ? record[key] : 0), 0);
 }
 
-export function calculateMonth({ salary, additionalIncomes = [], fixedExpenses = [], oneTimeExpenses = [] }) {
-  const salaryAmount = salary?.amountCents || 0;
+export function calculateMonth({ salary, salaries, additionalIncomes = [], fixedExpenses = [], oneTimeExpenses = [] }) {
+  const salaryRecords = Array.isArray(salaries) ? salaries : salary ? [salary] : [];
+  const salaryAmount = sumCents(salaryRecords);
   const otherIncomeAmount = sumCents(additionalIncomes);
   const totalIncome = salaryAmount + otherIncomeAmount;
   const receivedIncome =
-    (salary?.status === "received" ? salaryAmount : 0) +
+    sumCents(salaryRecords.filter((record) => record.status === "received")) +
     sumCents(additionalIncomes.filter((item) => item.status === "received"));
   const fixedAmount = sumCents(fixedExpenses);
   const oneTimeAmount = sumCents(oneTimeExpenses);
@@ -60,6 +63,35 @@ export function balanceState(balanceCents, totalIncomeCents) {
 
 export function filterMonthlyRecords(records, month) {
   return records.filter((record) => record.month === month || String(record.date || "").startsWith(month));
+}
+
+export function filterExpenseRecords(records, filters = {}) {
+  const search = normalizeText(filters.search);
+  return records.filter((record) => {
+    const comparisonDate = record.date || (record.month ? `${record.month}-01` : "");
+    return (
+      (!filters.profileId || filters.profileId === "__all__" || record.profileId === filters.profileId) &&
+      (!filters.categoryId || record.categoryId === filters.categoryId) &&
+      (!filters.paymentMethodId || record.paymentMethodId === filters.paymentMethodId) &&
+      (!filters.expenseType || record.expenseType === filters.expenseType) &&
+      (!filters.status || record.status === filters.status) &&
+      (!search || normalizeText(record.description).includes(search)) &&
+      (!filters.startDate || comparisonDate >= filters.startDate) &&
+      (!filters.endDate || comparisonDate <= filters.endDate)
+    );
+  });
+}
+
+export function summarizeExpenses(records) {
+  const total = sumCents(records);
+  const paid = sumCents(records.filter((record) => record.status === "paid"));
+  return {
+    count: records.length,
+    total,
+    paid,
+    pending: total - paid,
+    average: records.length ? Math.round(total / records.length) : 0
+  };
 }
 
 export function sortLargest(records, limit = 5) {

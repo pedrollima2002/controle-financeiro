@@ -1,4 +1,4 @@
-const CACHE_VERSION = "controle-financeiro-v1.0.0";
+const CACHE_VERSION = "controle-financeiro-v2.0.0";
 const APP_ROOT = new URL("./", self.registration.scope);
 const INDEX_URL = new URL("./index.html", APP_ROOT).href;
 const APP_SHELL = [

@@ -1,5 +1,5 @@
 import {
-  calculateMonth, filterMonthlyRecords, groupByCategory
+  calculateMonth, filterExpenseRecords, filterMonthlyRecords, groupByCategory, summarizeExpenses
 } from "../js/calculations.js";
 import {
   formatCurrency, parseMoneyToCents
@@ -8,7 +8,7 @@ import {
   createOccurrence, generateMissingOccurrences, shouldGenerateForMonth
 } from "../js/recurring.js";
 import {
-  mergeRecordsById, validateBackup
+  mergeRecordsById, normalizeBackup, validateBackup
 } from "../js/export.js";
 import { STORES } from "../js/database.js";
 
@@ -43,6 +43,17 @@ test("calcula total de receitas", () => {
     oneTimeExpenses: []
   });
   equal(result.totalIncome, 425000);
+  equal(result.receivedIncome, 400000);
+});
+
+test("soma salários de vários perfis no consolidado", () => {
+  const result = calculateMonth({
+    salaries: [
+      { amountCents: 400000, status: "received" },
+      { amountCents: 250000, status: "pending" }
+    ]
+  });
+  equal(result.salaryAmount, 650000);
   equal(result.receivedIncome, 400000);
 });
 
@@ -92,6 +103,17 @@ test("gera ocorrência com vencimento ajustado ao fim do mês", () => {
   equal(occurrence.occurrenceKey, "r1:2026-02");
 });
 
+test("gera gasto fixo sem data quando o vencimento é opcional", () => {
+  const occurrence = createOccurrence({
+    id: "r2", profileId: "p1", active: true, description: "Valor variável",
+    amountCents: 1000, dueDay: null, categoryId: "c1", paymentMethodId: "p1",
+    startDate: "2026-01-01"
+  }, "2026-07");
+  equal(occurrence.date, null);
+  equal(occurrence.dueDay, null);
+  equal(occurrence.profileId, "p1");
+});
+
 test("não duplica recorrências já existentes", () => {
   const recurring = {
     id: "r1", active: true, description: "Conta", amountCents: 1000, dueDay: 10,
@@ -103,9 +125,21 @@ test("não duplica recorrências já existentes", () => {
 
 test("valida a estrutura completa de backup", () => {
   const data = Object.fromEntries(STORES.map((store) => [store, []]));
-  const result = validateBackup({ format: "controle-financeiro", formatVersion: 1, data });
+  const result = validateBackup({ format: "controle-financeiro", formatVersion: 2, data });
   equal(result.valid, true);
-  equal(validateBackup({ format: "inválido", formatVersion: 1, data }).valid, false);
+  equal(validateBackup({ format: "inválido", formatVersion: 2, data }).valid, false);
+});
+
+test("migra backup antigo para o perfil Pessoal", () => {
+  const oldStores = STORES.filter((store) => store !== "profiles");
+  const data = Object.fromEntries(oldStores.map((store) => [store, []]));
+  data.oneTimeExpenses = [{ id: "g1", amountCents: 1000 }];
+  const oldBackup = { format: "controle-financeiro", formatVersion: 1, exportedAt: "2026-01-01T00:00:00.000Z", data };
+  equal(validateBackup(oldBackup).valid, true);
+  const migrated = normalizeBackup(oldBackup);
+  equal(migrated.formatVersion, 2);
+  equal(migrated.data.profiles[0].name, "Pessoal");
+  equal(migrated.data.oneTimeExpenses[0].profileId, "profile-default");
 });
 
 test("mescla registros por identificador sem duplicar", () => {
@@ -121,6 +155,26 @@ test("filtra registros pelo mês", () => {
     { month: "2026-08", id: 3 }
   ];
   deepEqual(filterMonthlyRecords(records, "2026-07").map((item) => item.id), [1, 2]);
+});
+
+test("combina filtros de perfil, categoria, pagamento e status", () => {
+  const records = [
+    { id: "1", profileId: "p1", categoryId: "c1", paymentMethodId: "pix", expenseType: "fixed", status: "paid", description: "Internet", date: "2026-07-10", amountCents: 10000 },
+    { id: "2", profileId: "p1", categoryId: "c1", paymentMethodId: "card", expenseType: "oneTime", status: "pending", description: "Mercado", date: "2026-07-12", amountCents: 20000 },
+    { id: "3", profileId: "p2", categoryId: "c1", paymentMethodId: "pix", expenseType: "fixed", status: "paid", description: "Internet", date: "2026-07-10", amountCents: 30000 }
+  ];
+  const filtered = filterExpenseRecords(records, {
+    profileId: "p1", categoryId: "c1", paymentMethodId: "pix", expenseType: "fixed", status: "paid"
+  });
+  deepEqual(filtered.map((item) => item.id), ["1"]);
+});
+
+test("resume o total filtrado, pago, pendente e média", () => {
+  const summary = summarizeExpenses([
+    { amountCents: 10000, status: "paid" },
+    { amountCents: 30000, status: "pending" }
+  ]);
+  deepEqual(summary, { count: 2, total: 40000, paid: 10000, pending: 30000, average: 20000 });
 });
 
 async function run() {

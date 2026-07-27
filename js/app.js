@@ -1,9 +1,11 @@
 import {
-  addRecord, bulkPut, clearDatabase, countCategoryUsage, deleteDemoData, deleteRecord,
-  getAll, getByIndex, getRecord, putRecord, replaceCategoryAndDelete, seedDefaults
+  DEFAULT_PROFILE_ID, bulkPut, clearDatabase, countCategoryUsage, createProfile,
+  deleteDemoData, deleteProfile, deleteRecord, getAll, getByIndex,
+  getByProfileMonth, getRecord, putRecord, replaceCategoryAndDelete, seedDefaults
 } from "./database.js";
 import {
-  balanceState, calculateMonth, combineExpenseRecords, groupByCategory, sortLargest, sumCents
+  balanceState, calculateMonth, combineExpenseRecords, filterExpenseRecords, groupByCategory,
+  sortLargest, sumCents, summarizeExpenses
 } from "./calculations.js";
 import { drawBars, drawDonut, drawLine } from "./charts.js";
 import { ensureOccurrencesForMonth } from "./recurring.js";
@@ -12,14 +14,25 @@ import {
 } from "./export.js";
 import {
   currentLocalDate, currentMonth, formatCurrency, formatDate, formatMoneyInput, isValidDate,
-  monthFromDate, monthLabel, normalizeText, nowIso, parseMoneyToCents, shiftMonth, uid
+  monthFromDate, monthLabel, normalizeText, nowIso, parseMoneyToCents, shiftMonth, uid,
+  dateForMonthAndDay
 } from "./utils.js";
+
+const ALL_PROFILES = "__all__";
+const ACTIVE_PROFILE_KEY = "finance-active-profile";
+const REPORT_PRESETS_KEY = "finance-report-presets";
+const LAST_BACKUP_KEY = "finance-last-backup";
 
 const state = {
   month: currentMonth(),
   view: "dashboard",
+  profiles: [],
+  activeProfileId: localStorage.getItem(ACTIVE_PROFILE_KEY) || DEFAULT_PROFILE_ID,
+  allCategories: [],
+  allPaymentMethods: [],
   categories: [],
   paymentMethods: [],
+  salaries: [],
   salary: null,
   incomes: [],
   recurring: [],
@@ -65,11 +78,31 @@ function replaceChildren(target, children = []) {
 }
 
 function categoryById(id) {
-  return state.categories.find((category) => category.id === id);
+  return state.allCategories.find((category) => category.id === id);
 }
 
 function paymentById(id) {
-  return state.paymentMethods.find((method) => method.id === id);
+  return state.allPaymentMethods.find((method) => method.id === id);
+}
+
+function profileById(id) {
+  return state.profiles.find((profile) => profile.id === id);
+}
+
+function activeProfile() {
+  return profileById(state.activeProfileId);
+}
+
+function isAllProfiles() {
+  return state.activeProfileId === ALL_PROFILES;
+}
+
+function profileName(id) {
+  return profileById(id)?.name || "Pessoal";
+}
+
+function profileScoped(records, profileId = state.activeProfileId) {
+  return profileId === ALL_PROFILES ? records : records.filter((record) => record.profileId === profileId);
 }
 
 function categoryInfo(id) {
@@ -144,16 +177,25 @@ function currentPaymentOptions(includeInactiveId = "") {
 }
 
 async function refreshReferenceData() {
-  [state.categories, state.paymentMethods, state.recurring, state.allExpenses] = await Promise.all([
-    getAll("categories"), getAll("paymentMethods"), getAll("recurringExpenses"), getAll("oneTimeExpenses")
+  [state.profiles, state.allCategories, state.allPaymentMethods, state.recurring, state.allExpenses] = await Promise.all([
+    getAll("profiles"), getAll("categories"), getAll("paymentMethods"), getAll("recurringExpenses"), getAll("oneTimeExpenses")
   ]);
+  state.profiles.sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
+  if (!isAllProfiles() && !state.profiles.some((profile) => profile.id === state.activeProfileId)) {
+    state.activeProfileId = state.profiles[0]?.id || DEFAULT_PROFILE_ID;
+    localStorage.setItem(ACTIVE_PROFILE_KEY, state.activeProfileId);
+  }
+  state.categories = profileScoped(state.allCategories);
+  state.paymentMethods = profileScoped(state.allPaymentMethods);
+  state.recurring = profileScoped(state.recurring);
+  state.allExpenses = profileScoped(state.allExpenses);
   state.categories.sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
   state.paymentMethods.sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
 }
 
 async function loadMonth() {
   if (!state.month) return;
-  await ensureOccurrencesForMonth(state.month);
+  await ensureOccurrencesForMonth(state.month, isAllProfiles() ? "" : state.activeProfileId);
   await refreshReferenceData();
   const [salaries, incomes, instances, expenses] = await Promise.all([
     getByIndex("monthlyIncomes", "month", state.month),
@@ -161,12 +203,13 @@ async function loadMonth() {
     getByIndex("monthlyExpenseInstances", "month", state.month),
     getByIndex("oneTimeExpenses", "month", state.month)
   ]);
-  state.salary = salaries[0] || null;
-  state.incomes = incomes.sort((left, right) => right.date.localeCompare(left.date));
-  state.instances = instances.sort((left, right) => left.date.localeCompare(right.date));
-  state.expenses = expenses.sort((left, right) => right.date.localeCompare(left.date));
+  state.salaries = profileScoped(salaries);
+  state.salary = isAllProfiles() ? null : state.salaries[0] || null;
+  state.incomes = profileScoped(incomes).sort((left, right) => right.date.localeCompare(left.date));
+  state.instances = profileScoped(instances).sort((left, right) => String(left.date || "9999").localeCompare(String(right.date || "9999")));
+  state.expenses = profileScoped(expenses).sort((left, right) => right.date.localeCompare(left.date));
   state.metrics = calculateMonth({
-    salary: state.salary,
+    salaries: state.salaries,
     additionalIncomes: state.incomes,
     fixedExpenses: state.instances,
     oneTimeExpenses: state.expenses
@@ -177,6 +220,26 @@ async function loadMonth() {
 function renderMonthLabels() {
   dom.monthPicker.value = state.month;
   dom.dashboardMonthLabel.textContent = monthLabel(state.month);
+}
+
+function renderProfileControls() {
+  replaceChildren(dom.profilePicker, [
+    ...state.profiles.map((profile) => createElement("option", { value: profile.id, text: `${profile.icon || "👤"} ${profile.name}` })),
+    createElement("option", { value: ALL_PROFILES, text: "◉ Todos os perfis" })
+  ]);
+  dom.profilePicker.value = state.activeProfileId;
+}
+
+function renderDashboardNotices() {
+  const lastBackup = localStorage.getItem(LAST_BACKUP_KEY);
+  const daysSinceBackup = lastBackup ? Math.floor((Date.now() - new Date(lastBackup).getTime()) / 86400000) : null;
+  dom.backupReminder.hidden = daysSinceBackup !== null && daysSinceBackup < 30;
+  dom.backupReminderText.textContent = daysSinceBackup === null
+    ? "Faça a primeira cópia dos seus dados para não depender apenas deste navegador."
+    : `A última cópia foi feita há ${daysSinceBackup} dia(s).`;
+  const undated = state.instances.filter((record) => !record.date && record.status === "pending");
+  dom.undatedExpensesPanel.hidden = !undated.length;
+  dom.undatedExpensesText.textContent = `${undated.length} pendência(s), somando ${formatCurrency(sumCents(undated))}.`;
 }
 
 function renderDashboard() {
@@ -193,7 +256,7 @@ function renderDashboard() {
   dom.balanceMessage.textContent = statusContent[2];
   dom.balanceValue.textContent = formatCurrency(metrics.forecastBalance);
   replaceChildren(dom.dashboardMetrics, [
-    metricCard("Salário líquido", formatCurrency(metrics.salaryAmount), state.salary?.status === "received" ? "Recebido" : "Previsto"),
+    metricCard(isAllProfiles() ? "Salários líquidos" : "Salário líquido", formatCurrency(metrics.salaryAmount), isAllProfiles() ? `${state.salaries.length} perfil(is)` : state.salary?.status === "received" ? "Recebido" : "Previsto"),
     metricCard("Outras receitas", formatCurrency(metrics.otherIncomeAmount), `${state.incomes.length} lançamento(s)`),
     metricCard("Total de receitas", formatCurrency(metrics.totalIncome), `${formatCurrency(metrics.receivedIncome)} recebidos`),
     metricCard("Gastos fixos", formatCurrency(metrics.fixedAmount), `${state.instances.filter((item) => item.status === "pending").length} pendente(s)`),
@@ -216,7 +279,7 @@ function renderDashboard() {
     ...state.incomes.map((record) => ({ ...record, transactionType: "income" })),
     ...state.instances.map((record) => ({ ...record, transactionType: "expense" })),
     ...state.expenses.map((record) => ({ ...record, transactionType: "expense" }))
-  ].sort((left, right) => String(right.date).localeCompare(String(left.date))).slice(0, 6);
+  ].sort((left, right) => String(right.date || `${right.month}-32`).localeCompare(String(left.date || `${left.month}-32`))).slice(0, 6);
   if (!transactions.length) {
     replaceChildren(dom.recentTransactions, createElement("div", { className: "empty-state" }, [
       createElement("strong", { text: "Nenhum lançamento ainda" }),
@@ -229,12 +292,13 @@ function renderDashboard() {
         createElement("span", { className: "category-icon", text: record.transactionType === "income" ? "↗" : category.icon, style: { borderLeft: `4px solid ${category.color}` } }),
         createElement("div", {}, [
           createElement("strong", { className: "transaction-title", text: record.description || "Salário líquido" }),
-          createElement("span", { className: "transaction-meta", text: `${formatDate(record.date)} · ${record.transactionType === "income" ? "Receita" : category.name}` })
+          createElement("span", { className: "transaction-meta", text: `${record.date ? formatDate(record.date) : "Sem vencimento"} · ${record.transactionType === "income" ? "Receita" : category.name}${isAllProfiles() ? ` · ${profileName(record.profileId)}` : ""}` })
         ]),
         createElement("strong", { className: `transaction-value ${record.transactionType}`, text: `${record.transactionType === "income" ? "+" : "−"} ${formatCurrency(record.amountCents)}` })
       ]);
     }));
   }
+  renderDashboardNotices();
 }
 
 function renderIncomes() {
@@ -243,7 +307,14 @@ function renderIncomes() {
     miniMetric("Recebido", formatCurrency(state.metrics.receivedIncome)),
     miniMetric("Pendente", formatCurrency(state.metrics.totalIncome - state.metrics.receivedIncome))
   ]);
-  if (state.salary) {
+  if (isAllProfiles()) {
+    replaceChildren(dom.salaryCard, createElement("div", { className: "salary-display" }, [
+      createElement("div", {}, [
+        createElement("strong", { text: formatCurrency(state.metrics.salaryAmount) }),
+        createElement("span", { text: `Total de ${state.salaries.length} salário(s) no mês. Escolha um perfil para editar.` })
+      ])
+    ]));
+  } else if (state.salary) {
     replaceChildren(dom.salaryCard, createElement("div", { className: "salary-display" }, [
       createElement("div", {}, [
         createElement("strong", { text: formatCurrency(state.salary.amountCents) }),
@@ -271,7 +342,7 @@ function renderIncomes() {
       actionButton("delete-income", record.id, "Excluir receita", "×", "delete")
     ]);
     return createElement("tr", {}, [
-      tableCell(formatDate(record.date)), tableCell(record.description), tableCell(`${category.icon} ${category.name}`),
+      tableCell(formatDate(record.date)), tableCell(record.description), tableCell(`${category.icon} ${category.name}${isAllProfiles() ? ` · ${profileName(record.profileId)}` : ""}`),
       tableCell(statusPill(record.status)), tableCell(formatCurrency(record.amountCents), "numeric"), tableCell(actions)
     ]);
   }));
@@ -296,7 +367,7 @@ function renderRecurring() {
         actionButton("delete-instance", record.id, "Excluir somente esta ocorrência", "×", "delete")
       ]);
       return createElement("tr", {}, [
-        tableCell(formatDate(record.date)), tableCell(record.description), tableCell(`${category.icon} ${category.name}`),
+        tableCell(record.date ? formatDate(record.date) : "Sem vencimento"), tableCell(record.description), tableCell(`${category.icon} ${category.name}${isAllProfiles() ? ` · ${profileName(record.profileId)}` : ""}`),
         tableCell(statusPill(record.status)), tableCell(formatCurrency(record.amountCents), "numeric"), tableCell(actions)
       ]);
     }));
@@ -315,7 +386,7 @@ function renderRecurring() {
         actionButton("delete-recurring", record.id, "Excluir recorrência", "×", "delete")
       ]);
       return createElement("tr", {}, [
-        tableCell(record.description), tableCell(`Dia ${record.dueDay}`), tableCell(`${category.icon} ${category.name}`),
+        tableCell(record.description), tableCell(record.dueDay ? `Dia ${record.dueDay}` : "Sem vencimento"), tableCell(`${category.icon} ${category.name}${isAllProfiles() ? ` · ${profileName(record.profileId)}` : ""}`),
         tableCell(statusPill(record.active ? "active" : "inactive")), tableCell(formatCurrency(record.amountCents), "numeric"), tableCell(actions)
       ]);
     }));
@@ -399,7 +470,7 @@ function renderManagement() {
     createElement("span", { className: "color-dot", text: category.icon || "•", style: { "--item-color": category.color || "#737f7c" } }),
     createElement("div", {}, [
       createElement("strong", { text: category.name }),
-      createElement("span", { text: `${category.kind === "income" ? "Receitas" : category.kind === "expense" ? "Despesas" : "Receitas e despesas"} · ${category.active ? "Ativa" : "Inativa"}` })
+      createElement("span", { text: `${category.kind === "income" ? "Receitas" : category.kind === "expense" ? "Despesas" : "Receitas e despesas"} · ${category.active ? "Ativa" : "Inativa"}${isAllProfiles() ? ` · ${profileName(category.profileId)}` : ""}` })
     ]),
     createElement("div", { className: "row-actions" }, [
       actionButton("edit-category", category.id, "Editar categoria", "✎"),
@@ -410,7 +481,7 @@ function renderManagement() {
   const methods = [...state.paymentMethods].sort((a, b) => Number(b.active) - Number(a.active) || a.name.localeCompare(b.name, "pt-BR"));
   replaceChildren(dom.paymentList, methods.map((method) => createElement("div", { className: "management-item" }, [
     createElement("span", { className: "color-dot", text: "¤", style: { "--item-color": method.active ? "#0f766e" : "#737f7c" } }),
-    createElement("div", {}, [createElement("strong", { text: method.name }), createElement("span", { text: method.active ? "Ativa" : "Inativa" })]),
+    createElement("div", {}, [createElement("strong", { text: method.name }), createElement("span", { text: `${method.active ? "Ativa" : "Inativa"}${isAllProfiles() ? ` · ${profileName(method.profileId)}` : ""}` })]),
     createElement("div", { className: "row-actions" }, [
       actionButton("edit-payment", method.id, "Editar forma de pagamento", "✎"),
       actionButton("toggle-payment", method.id, method.active ? "Desativar forma de pagamento" : "Ativar forma de pagamento", method.active ? "◉" : "○")
@@ -418,27 +489,137 @@ function renderManagement() {
   ])));
 }
 
-async function monthlyHistory() {
-  const [salaries, incomes, fixed, expenses] = await Promise.all([
-    getAll("monthlyIncomes"), getAll("additionalIncomes"), getAll("monthlyExpenseInstances"), getAll("oneTimeExpenses")
+function renderProfiles() {
+  replaceChildren(dom.profileList, state.profiles.map((profile) => createElement("div", { className: `management-item profile-item${profile.id === state.activeProfileId ? " selected" : ""}` }, [
+    createElement("span", { className: "profile-avatar", text: profile.icon || "👤", style: { "--item-color": profile.color || "#0f766e" } }),
+    createElement("div", {}, [
+      createElement("strong", { text: profile.name }),
+      createElement("span", { text: profile.id === state.activeProfileId ? "Perfil atual" : "Dados financeiros separados" })
+    ]),
+    createElement("div", { className: "row-actions" }, [
+      actionButton("switch-profile", profile.id, "Usar este perfil", "✓"),
+      actionButton("edit-profile", profile.id, "Editar perfil", "✎"),
+      actionButton("delete-profile", profile.id, "Excluir perfil e seus dados", "×", "delete")
+    ])
+  ])));
+}
+
+function renderReportFilterOptions() {
+  const selectedProfile = dom.reportProfile.value || state.activeProfileId;
+  replaceChildren(dom.reportProfile, [
+    createElement("option", { value: ALL_PROFILES, text: "Todos os perfis" }),
+    ...state.profiles.map((profile) => createElement("option", { value: profile.id, text: `${profile.icon || "👤"} ${profile.name}` }))
   ]);
-  const months = Array.from({ length: 6 }, (_, index) => shiftMonth(state.month, index - 5));
-  return months.map((month) => {
-    const metrics = calculateMonth({
-      salary: salaries.find((record) => record.month === month),
-      additionalIncomes: incomes.filter((record) => record.month === month),
-      fixedExpenses: fixed.filter((record) => record.month === month),
-      oneTimeExpenses: expenses.filter((record) => record.month === month)
-    });
-    return { month, metrics };
-  });
+  dom.reportProfile.value = [...dom.reportProfile.options].some((option) => option.value === selectedProfile)
+    ? selectedProfile
+    : state.activeProfileId;
+  const profileId = dom.reportProfile.value;
+  const categories = profileId === ALL_PROFILES
+    ? state.allCategories
+    : state.allCategories.filter((record) => record.profileId === profileId);
+  const methods = profileId === ALL_PROFILES
+    ? state.allPaymentMethods
+    : state.allPaymentMethods.filter((record) => record.profileId === profileId);
+  const categoryValue = dom.reportCategory.value;
+  const paymentValue = dom.reportPayment.value;
+  fillFilterSelect(dom.reportCategory, "Todas", categories
+    .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"))
+    .map((record) => ({ value: record.id, label: `${record.icon || "•"} ${record.name}${record.active ? "" : " (inativa)"}${profileId === ALL_PROFILES ? ` · ${profileName(record.profileId)}` : ""}` })), categoryValue);
+  fillFilterSelect(dom.reportPayment, "Todos", methods
+    .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"))
+    .map((record) => ({ value: record.id, label: `${record.name}${record.active ? "" : " (inativa)"}${profileId === ALL_PROFILES ? ` · ${profileName(record.profileId)}` : ""}` })), paymentValue);
+}
+
+function reportPeriodBounds(period) {
+  if (period === "all") return {};
+  if (period === "custom") return {
+    startDate: dom.reportStart.value || "",
+    endDate: dom.reportEnd.value || ""
+  };
+  const length = period === "month" ? 1 : Number(period);
+  return {
+    startDate: `${shiftMonth(state.month, -(length - 1))}-01`,
+    endDate: `${state.month}-31`
+  };
+}
+
+function reportFilterValues() {
+  const form = new FormData(dom.reportFilters);
+  return {
+    profileId: String(form.get("profileId") || state.activeProfileId),
+    categoryId: String(form.get("categoryId") || ""),
+    paymentMethodId: String(form.get("paymentMethodId") || ""),
+    expenseType: String(form.get("expenseType") || ""),
+    status: String(form.get("status") || ""),
+    search: String(form.get("search") || ""),
+    ...reportPeriodBounds(String(form.get("period") || "month"))
+  };
+}
+
+function monthsBetween(startDate, endDate, availableMonths = []) {
+  const normalizedAvailable = [...new Set(availableMonths)].filter(Boolean).sort();
+  if (!startDate && !endDate) return normalizedAvailable;
+  if (!startDate || !endDate) {
+    const startMonth = startDate ? monthFromDate(startDate) : "";
+    const endMonth = endDate ? monthFromDate(endDate) : "";
+    return normalizedAvailable.filter((month) => (!startMonth || month >= startMonth) && (!endMonth || month <= endMonth));
+  }
+  const start = monthFromDate(startDate || endDate);
+  const end = monthFromDate(endDate || startDate);
+  const result = [];
+  let cursor = start;
+  while (cursor && cursor <= end && result.length < 240) {
+    result.push(cursor);
+    cursor = shiftMonth(cursor, 1);
+  }
+  return result;
+}
+
+async function reportData() {
+  const period = dom.reportPeriod.value;
+  const bounds = reportPeriodBounds(period);
+  if (["month", "3", "6", "12"].includes(period)) {
+    const months = monthsBetween(bounds.startDate, bounds.endDate);
+    await Promise.all(months.map((month) => ensureOccurrencesForMonth(
+      month,
+      dom.reportProfile.value === ALL_PROFILES ? "" : dom.reportProfile.value
+    )));
+  }
+  const [fixed, oneTime, salaries, incomes] = await Promise.all([
+    getAll("monthlyExpenseInstances"), getAll("oneTimeExpenses"), getAll("monthlyIncomes"), getAll("additionalIncomes")
+  ]);
+  return { fixed, oneTime, salaries, incomes };
+}
+
+async function getFilteredReportRecords() {
+  renderReportFilterOptions();
+  const filters = reportFilterValues();
+  const data = await reportData();
+  const records = filterExpenseRecords(combineExpenseRecords(data.fixed, data.oneTime), filters)
+    .sort((left, right) => String(right.date || `${right.month}-32`).localeCompare(String(left.date || `${left.month}-32`)));
+  return { filters, data, records };
 }
 
 async function renderReports() {
-  const combined = combineExpenseRecords(state.instances, state.expenses);
+  const { filters, data, records: combined } = await getFilteredReportRecords();
+  const summary = summarizeExpenses(combined);
+  replaceChildren(dom.reportMetrics, [
+    miniMetric("Gastos encontrados", String(summary.count)),
+    miniMetric("Total", formatCurrency(summary.total)),
+    miniMetric("Pago", formatCurrency(summary.paid)),
+    miniMetric("Pendente", formatCurrency(summary.pending)),
+    miniMetric("Média por gasto", formatCurrency(summary.average))
+  ]);
   const grouped = groupByCategory(combined);
   const categoryEntries = Object.entries(grouped)
-    .map(([categoryId, value]) => ({ label: categoryInfo(categoryId).name, value, color: categoryInfo(categoryId).color }))
+    .map(([categoryId, value]) => {
+      const category = categoryInfo(categoryId);
+      return {
+        label: `${category.name}${filters.profileId === ALL_PROFILES ? ` · ${profileName(category.profileId)}` : ""}`,
+        value,
+        color: category.color
+      };
+    })
     .sort((a, b) => b.value - a.value);
   drawDonut(dom.categoryReportChart, categoryEntries);
   dom.categoryReportSummary.textContent = categoryEntries.length
@@ -446,32 +627,89 @@ async function renderReports() {
     : "Sem despesas no período selecionado.";
 
   const typeEntries = [
-    { label: "Fixas", value: state.metrics.fixedAmount, color: "#0f766e" },
-    { label: "Avulsas", value: state.metrics.oneTimeAmount, color: "#dc7d30" }
+    { label: "Fixas", value: sumCents(combined.filter((record) => record.expenseType === "fixed")), color: "#0f766e" },
+    { label: "Avulsas", value: sumCents(combined.filter((record) => record.expenseType === "oneTime")), color: "#dc7d30" }
   ];
   drawBars(dom.expenseTypeChart, typeEntries);
-  dom.expenseTypeSummary.textContent = `Fixas: ${formatCurrency(state.metrics.fixedAmount)}. Avulsas: ${formatCurrency(state.metrics.oneTimeAmount)}.`;
+  dom.expenseTypeSummary.textContent = `Fixas: ${formatCurrency(typeEntries[0].value)}. Avulsas: ${formatCurrency(typeEntries[1].value)}.`;
 
+  const incomeInPeriod = (record) => {
+    const date = record.date || `${record.month}-01`;
+    return (filters.profileId === ALL_PROFILES || record.profileId === filters.profileId) &&
+      (!filters.startDate || date >= filters.startDate) &&
+      (!filters.endDate || date <= filters.endDate);
+  };
+  const totalIncome = sumCents(data.salaries.filter(incomeInPeriod)) + sumCents(data.incomes.filter(incomeInPeriod));
   const comparisonEntries = [
-    { label: "Receitas", value: state.metrics.totalIncome, color: "#177245" },
-    { label: "Despesas", value: state.metrics.totalExpenses, color: "#b42318" }
+    { label: "Receitas", value: totalIncome, color: "#177245" },
+    { label: "Despesas filtradas", value: summary.total, color: "#b42318" }
   ];
   drawBars(dom.incomeExpenseChart, comparisonEntries);
-  dom.incomeExpenseSummary.textContent = `Receitas previstas: ${formatCurrency(state.metrics.totalIncome)}. Despesas previstas: ${formatCurrency(state.metrics.totalExpenses)}.`;
+  dom.incomeExpenseSummary.textContent = `Receitas do período: ${formatCurrency(totalIncome)}. Despesas filtradas: ${formatCurrency(summary.total)}.`;
 
-  const history = await monthlyHistory();
-  const historyEntries = history.map(({ month, metrics }) => ({
+  const availableMonths = [
+    ...combined.map((record) => record.month || monthFromDate(record.date)),
+    ...data.salaries.filter(incomeInPeriod).map((record) => record.month),
+    ...data.incomes.filter(incomeInPeriod).map((record) => record.month || monthFromDate(record.date))
+  ].filter(Boolean);
+  let months = monthsBetween(filters.startDate, filters.endDate, availableMonths);
+  if (!months.length && dom.reportPeriod.value === "month") months = [state.month];
+  const history = months.map((month) => {
+    const income = sumCents(data.salaries.filter((record) => incomeInPeriod(record) && record.month === month)) +
+      sumCents(data.incomes.filter((record) => incomeInPeriod(record) && (record.month || monthFromDate(record.date)) === month));
+    const expenses = sumCents(combined.filter((record) => (record.month || monthFromDate(record.date)) === month));
+    return { month, income, expenses, balance: income - expenses };
+  });
+  const historyEntries = history.map(({ month, balance }) => ({
     label: monthLabel(month, { month: "short" }).replace(".", ""),
-    value: metrics.forecastBalance
+    value: balance
   }));
   drawLine(dom.balanceHistoryChart, historyEntries);
-  dom.balanceHistorySummary.textContent = history.map(({ month, metrics }) => `${monthLabel(month, { month: "short", year: "2-digit" })}: ${formatCurrency(metrics.forecastBalance)}`).join(" · ");
+  dom.balanceHistorySummary.textContent = history.length
+    ? `${history.map(({ month, balance }) => `${monthLabel(month, { month: "short", year: "2-digit" })}: ${formatCurrency(balance)}`).join(" · ")}. O saldo considera apenas as despesas filtradas.`
+    : "Sem meses com movimentações no período.";
+
+  const statusEntries = [
+    { label: "Pagas", value: summary.paid, color: "#177245" },
+    { label: "Pendentes", value: summary.pending, color: "#d97706" }
+  ];
+  drawDonut(dom.paymentStatusChart, statusEntries);
+  dom.paymentStatusSummary.textContent = `Pagas: ${formatCurrency(summary.paid)}. Pendentes: ${formatCurrency(summary.pending)}.`;
+
+  const expenseHistory = history.map(({ month, expenses }) => ({
+    label: monthLabel(month, { month: "short" }).replace(".", ""),
+    value: expenses
+  }));
+  drawLine(dom.expenseHistoryChart, expenseHistory);
+  dom.expenseHistorySummary.textContent = history.length
+    ? history.map(({ month, expenses }) => `${monthLabel(month, { month: "short", year: "2-digit" })}: ${formatCurrency(expenses)}`).join(" · ")
+    : "Sem despesas no período.";
 
   const largest = sortLargest(combined, 8);
   replaceChildren(dom.largestExpenses, largest.length ? largest.map((record) => createElement("li", {}, [
     createElement("span", { text: `${record.description} · ${categoryInfo(record.categoryId).name}` }),
     createElement("strong", { text: formatCurrency(record.amountCents) })
   ])) : [createElement("li", {}, [createElement("span", { text: "Sem despesas para classificar." }), createElement("strong", { text: "—" })])]);
+
+  if (!combined.length) {
+    dom.reportExpenseBody.replaceChildren();
+    showEmpty(dom.reportExpenseEmpty, "Nenhum gasto encontrado", "Ajuste os filtros para consultar outro período.");
+  } else {
+    hideEmpty(dom.reportExpenseEmpty);
+    replaceChildren(dom.reportExpenseBody, combined.map((record) => {
+      const category = categoryInfo(record.categoryId);
+      return createElement("tr", {}, [
+        tableCell(profileName(record.profileId)),
+        tableCell(record.date ? formatDate(record.date) : "Sem vencimento"),
+        tableCell(record.description),
+        tableCell(`${category.icon} ${category.name}`),
+        tableCell(paymentById(record.paymentMethodId)?.name || "—"),
+        tableCell(record.expenseType === "fixed" ? "Fixo" : "Avulso"),
+        tableCell(statusPill(record.status)),
+        tableCell(formatCurrency(record.amountCents), "numeric")
+      ]);
+    }));
+  }
 }
 
 function renderThemeControls() {
@@ -479,14 +717,72 @@ function renderThemeControls() {
   $$("[data-theme-value]").forEach((button) => button.classList.toggle("active", button.dataset.themeValue === theme));
 }
 
+function readReportPresets() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(REPORT_PRESETS_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function renderReportPresets(selectedId = dom.reportPreset?.value || "") {
+  const presets = readReportPresets();
+  replaceChildren(dom.reportPreset, [
+    createElement("option", { value: "", text: "Nenhum" }),
+    ...presets.map((preset) => createElement("option", { value: preset.id, text: preset.name }))
+  ]);
+  dom.reportPreset.value = presets.some((preset) => preset.id === selectedId) ? selectedId : "";
+  dom.deleteReportPreset.disabled = !dom.reportPreset.value;
+}
+
+function reportFormSnapshot() {
+  return Object.fromEntries([...new FormData(dom.reportFilters).entries()].map(([key, value]) => [key, String(value)]));
+}
+
+async function saveReportPreset() {
+  const name = window.prompt("Nome para este filtro:");
+  if (!name?.trim()) return;
+  const presets = readReportPresets();
+  const preset = { id: uid(), name: name.trim().slice(0, 50), filters: reportFormSnapshot() };
+  presets.push(preset);
+  localStorage.setItem(REPORT_PRESETS_KEY, JSON.stringify(presets));
+  renderReportPresets(preset.id);
+  toast("Filtro salvo neste navegador.");
+}
+
+async function applyReportPreset(id) {
+  const preset = readReportPresets().find((item) => item.id === id);
+  if (!preset) return;
+  Object.entries(preset.filters || {}).forEach(([name, value]) => {
+    const control = dom.reportFilters.elements.namedItem(name);
+    if (control) control.value = value;
+  });
+  renderReportFilterOptions();
+  $$(".report-custom-date").forEach((field) => { field.hidden = dom.reportPeriod.value !== "custom"; });
+  await renderReports();
+}
+
+function deleteReportPreset() {
+  const id = dom.reportPreset.value;
+  if (!id) return;
+  const presets = readReportPresets().filter((preset) => preset.id !== id);
+  localStorage.setItem(REPORT_PRESETS_KEY, JSON.stringify(presets));
+  renderReportPresets();
+  toast("Filtro salvo excluído.");
+}
+
 async function renderAll() {
   renderMonthLabels();
+  renderProfileControls();
   renderDashboard();
   renderIncomes();
   renderRecurring();
   renderExpenses();
   renderManagement();
+  renderProfiles();
   renderThemeControls();
+  renderReportPresets();
   if (state.view === "reports") await renderReports();
 }
 
@@ -569,7 +865,7 @@ const EDITOR_SCHEMAS = {
       fields: [
         { name: "description", label: "Descrição", type: "text", value: record.description || "", required: true, span: 2, maxlength: 80 },
         { name: "amount", label: "Valor", type: "money", value: record.amountCents, required: true },
-        { name: "dueDay", label: "Dia do vencimento", type: "number", value: record.dueDay || 10, min: 1, max: 31, required: true },
+        { name: "dueDay", label: "Dia do vencimento (opcional)", type: "number", value: record.dueDay ?? "", min: 1, max: 31 },
         { name: "categoryId", label: "Categoria", type: "select", value: record.categoryId || "", options: currentCategoryOptions({ includeInactiveId: record.categoryId, kind: "expense" }), required: true },
         { name: "paymentMethodId", label: "Forma de pagamento", type: "select", value: record.paymentMethodId || "", options: currentPaymentOptions(record.paymentMethodId), required: true },
         { name: "startDate", label: "Data inicial", type: "date", value: record.startDate || `${state.month}-01`, required: true },
@@ -586,7 +882,7 @@ const EDITOR_SCHEMAS = {
       fields: [
         { name: "description", label: "Descrição", type: "text", value: record.description || "", required: true, span: 2, maxlength: 80 },
         { name: "amount", label: "Valor", type: "money", value: record.amountCents, required: true },
-        { name: "date", label: "Vencimento", type: "date", value: record.date, required: true },
+        { name: "date", label: "Vencimento (opcional)", type: "date", value: record.date || "" },
         { name: "categoryId", label: "Categoria", type: "select", value: record.categoryId, options: currentCategoryOptions({ includeInactiveId: record.categoryId, kind: "expense" }), required: true },
         { name: "paymentMethodId", label: "Forma de pagamento", type: "select", value: record.paymentMethodId, options: currentPaymentOptions(record.paymentMethodId), required: true },
         { name: "status", label: "Status", type: "select", value: record.status, options: [{ value: "paid", label: "Pago" }, { value: "pending", label: "Pendente" }], required: true },
@@ -613,6 +909,23 @@ const EDITOR_SCHEMAS = {
       fields: [
         { name: "name", label: "Nome", type: "text", value: record.name || "", required: true, span: 2, maxlength: 50 },
         { name: "active", label: "Forma de pagamento ativa", type: "checkbox", value: record.id ? record.active : true, span: 2 }
+      ]
+    };
+  },
+  profile(record = {}) {
+    return {
+      kind: "profile", record, kicker: "Finanças separadas", title: record.id ? "Editar perfil" : "Novo perfil financeiro",
+      fields: [
+        { name: "name", label: "Nome do perfil", type: "text", value: record.name || "", required: true, span: 2, maxlength: 40 },
+        { name: "icon", label: "Ícone", type: "select", value: record.icon || "👤", options: ["👤", "👩", "👨", "👪", "🏠", "💼", "🎯", "🐾"].map((icon) => ({ value: icon, label: icon })), required: true },
+        { name: "color", label: "Cor", type: "color", value: record.color || "#0f766e", required: true },
+        ...(!record.id ? [{
+          name: "copyFromProfileId", label: "Copiar categorias e pagamentos de", type: "select",
+          value: activeProfile()?.id || "", options: [
+            { value: "", label: "Usar cadastros padrão" },
+            ...state.profiles.map((profile) => ({ value: profile.id, label: `${profile.icon || "👤"} ${profile.name}` }))
+          ], span: 2
+        }] : [])
       ]
     };
   }
@@ -674,7 +987,7 @@ function editorValues() {
   state.editor.fields.forEach((field) => {
     if (field.type === "checkbox") values[field.name] = form.has(field.name);
     else if (field.type === "money") values[field.name] = parseMoneyToCents(form.get(field.name));
-    else if (field.type === "number") values[field.name] = Number(form.get(field.name));
+    else if (field.type === "number") values[field.name] = String(form.get(field.name) || "").trim() === "" ? null : Number(form.get(field.name));
     else values[field.name] = String(form.get(field.name) || "").trim();
   });
   return values;
@@ -687,8 +1000,8 @@ function validateEditor(values) {
   if (values.startDate && !isValidDate(values.startDate)) throw new Error("Informe uma data inicial válida.");
   if (values.endDate && !isValidDate(values.endDate)) throw new Error("Informe uma data final válida.");
   if (values.startDate && values.endDate && values.endDate < values.startDate) throw new Error("A data final não pode ser anterior à data inicial.");
-  if (kind === "recurring" && (!Number.isInteger(values.dueDay) || values.dueDay < 1 || values.dueDay > 31)) throw new Error("O vencimento deve ficar entre os dias 1 e 31.");
-  if (kind === "instance" && values.status === "paid" && !values.paidDate) values.paidDate = values.date;
+  if (kind === "recurring" && values.dueDay !== null && (!Number.isInteger(values.dueDay) || values.dueDay < 1 || values.dueDay > 31)) throw new Error("Quando informado, o vencimento deve ficar entre os dias 1 e 31.");
+  if (kind === "instance" && values.status === "paid" && !values.paidDate) values.paidDate = values.date || currentLocalDate();
   if (kind === "instance" && values.status === "pending") values.paidDate = "";
   if ((kind === "category" || kind === "payment") && !values.name) throw new Error("Informe um nome.");
   if (kind === "category") {
@@ -699,13 +1012,17 @@ function validateEditor(values) {
     const duplicate = state.paymentMethods.find((method) => method.id !== record.id && normalizeText(method.name) === normalizeText(values.name));
     if (duplicate) throw new Error("Já existe uma forma de pagamento com esse nome.");
   }
+  if (kind === "profile") {
+    const duplicate = state.profiles.find((profile) => profile.id !== record.id && normalizeText(profile.name) === normalizeText(values.name));
+    if (duplicate) throw new Error("Já existe um perfil com esse nome.");
+  }
 }
 
 async function saveEditor(values) {
   const { kind, record } = state.editor;
-  const base = { ...record, origin: record.origin || "user" };
+  const base = { ...record, profileId: record.profileId || state.activeProfileId, origin: record.origin || "user" };
   if (kind === "salary") {
-    await putRecord("monthlyIncomes", { ...base, id: record.id || `salary-${state.month}`, month: state.month, amountCents: values.amount, status: values.status, notes: values.notes });
+    await putRecord("monthlyIncomes", { ...base, id: record.id || `salary-${state.activeProfileId}-${state.month}`, month: state.month, amountCents: values.amount, status: values.status, notes: values.notes });
   } else if (kind === "income") {
     await putRecord("additionalIncomes", { ...base, description: values.description, amountCents: values.amount, date: values.date, month: monthFromDate(values.date), categoryId: values.categoryId, status: values.status, notes: values.notes });
   } else if (kind === "expense") {
@@ -721,13 +1038,15 @@ async function saveEditor(values) {
       if (instance) {
         await putRecord("monthlyExpenseInstances", {
           ...instance, description: saved.description, amountCents: saved.amountCents, categoryId: saved.categoryId,
-          paymentMethodId: saved.paymentMethodId, notes: saved.notes
+          paymentMethodId: saved.paymentMethodId, dueDay: saved.dueDay,
+          date: saved.dueDay ? dateForMonthAndDay(state.month, saved.dueDay) : null, notes: saved.notes
         });
       }
     }
   } else if (kind === "instance") {
     await putRecord("monthlyExpenseInstances", {
       ...base, description: values.description, amountCents: values.amount, date: values.date,
+      dueDay: values.date ? Number(values.date.slice(-2)) : null,
       categoryId: values.categoryId, paymentMethodId: values.paymentMethodId, status: values.status,
       paidDate: values.paidDate || null, notes: values.notes
     });
@@ -735,6 +1054,17 @@ async function saveEditor(values) {
     await putRecord("categories", { ...base, name: values.name, icon: values.icon, color: values.color, kind: values.kind, active: values.active });
   } else if (kind === "payment") {
     await putRecord("paymentMethods", { ...base, name: values.name, active: values.active });
+  } else if (kind === "profile") {
+    if (record.id) {
+      await putRecord("profiles", { ...record, name: values.name, icon: values.icon, color: values.color });
+    } else {
+      const profile = await createProfile({
+        name: values.name, icon: values.icon, color: values.color,
+        copyFromProfileId: values.copyFromProfileId
+      });
+      state.activeProfileId = profile.id;
+      localStorage.setItem(ACTIVE_PROFILE_KEY, profile.id);
+    }
   }
 }
 
@@ -763,6 +1093,21 @@ async function deleteWithConfirmation(store, id, label) {
 
 async function handleAction(action, id) {
   try {
+    const profileActions = new Set(["profile-form", "edit-profile", "switch-profile", "delete-profile"]);
+    if (isAllProfiles() && !profileActions.has(action)) {
+      toast("Escolha um perfil específico para incluir ou alterar dados.", "error");
+      return;
+    }
+    if (action === "profile-form") return openEditor(EDITOR_SCHEMAS.profile());
+    if (action === "edit-profile") return openEditor(EDITOR_SCHEMAS.profile(await getRecord("profiles", id)));
+    if (action === "switch-profile") {
+      state.activeProfileId = id;
+      localStorage.setItem(ACTIVE_PROFILE_KEY, id);
+      toast(`Perfil “${profileName(id)}” selecionado.`);
+      await loadMonth();
+      return;
+    }
+    if (action === "delete-profile") return handleProfileDelete(id);
     if (action === "salary-form") return openEditor(EDITOR_SCHEMAS.salary(state.salary || {}));
     if (action === "income-form") return openEditor(EDITOR_SCHEMAS.income());
     if (action === "expense-form") return openEditor(EDITOR_SCHEMAS.expense({ date: state.month === currentMonth() ? currentLocalDate() : `${state.month}-01` }));
@@ -823,6 +1168,35 @@ async function handleAction(action, id) {
   }
 }
 
+async function handleProfileDelete(id) {
+  if (state.profiles.length <= 1) {
+    toast("Crie outro perfil antes de excluir o único perfil existente.", "error");
+    return;
+  }
+  const profile = await getRecord("profiles", id);
+  const input = createElement("input", { id: "profile-delete-confirmation", type: "text", autocomplete: "off", placeholder: profile.name });
+  const wrapper = createElement("div", { className: "field" }, [
+    createElement("label", { for: "profile-delete-confirmation", text: `Digite ${profile.name} para confirmar` }),
+    input
+  ]);
+  const confirmed = await confirmAction({
+    title: `Excluir o perfil “${profile.name}”?`,
+    message: "Todas as receitas, despesas, recorrências, categorias e formas de pagamento desse perfil serão apagadas. Faça um backup antes, se quiser preservar os dados.",
+    confirmLabel: "Excluir perfil e dados",
+    extra: wrapper,
+    validate: () => input.value.trim() === profile.name
+  });
+  if (!confirmed) return;
+  await deleteProfile(id);
+  if (state.activeProfileId === id) {
+    const remaining = state.profiles.find((item) => item.id !== id);
+    state.activeProfileId = remaining.id;
+    localStorage.setItem(ACTIVE_PROFILE_KEY, remaining.id);
+  }
+  toast("Perfil e dados associados foram excluídos.");
+  await loadMonth();
+}
+
 async function handleCategoryDelete(id) {
   const category = await getRecord("categories", id);
   const usage = await countCategoryUsage(id);
@@ -856,8 +1230,9 @@ async function handleCategoryDelete(id) {
 }
 
 async function copyPreviousSalary() {
+  if (isAllProfiles()) return toast("Escolha um perfil específico para copiar o salário.", "error");
   const previousMonth = shiftMonth(state.month, -1);
-  const previous = (await getByIndex("monthlyIncomes", "month", previousMonth))[0];
+  const previous = (await getByProfileMonth("monthlyIncomes", state.activeProfileId, previousMonth))[0];
   if (!previous) return toast(`Não há salário cadastrado em ${monthLabel(previousMonth)}.`, "error");
   if (state.salary) {
     const confirmed = await confirmAction({
@@ -868,7 +1243,8 @@ async function copyPreviousSalary() {
     if (!confirmed) return;
   }
   await putRecord("monthlyIncomes", {
-    id: state.salary?.id || `salary-${state.month}`, month: state.month, amountCents: previous.amountCents,
+    id: state.salary?.id || `salary-${state.activeProfileId}-${state.month}`, profileId: state.activeProfileId,
+    month: state.month, amountCents: previous.amountCents,
     status: "pending", notes: `Copiado de ${previousMonth}`, origin: "user"
   });
   toast("Salário copiado do mês anterior.");
@@ -876,6 +1252,7 @@ async function copyPreviousSalary() {
 }
 
 async function loadDemo() {
+  if (isAllProfiles()) return toast("Escolha um perfil específico para carregar a demonstração.", "error");
   const confirmed = await confirmAction({
     title: "Carregar dados de demonstração?",
     message: "Os exemplos serão identificados e não substituirão seus registros. Você poderá apagá-los separadamente.",
@@ -886,15 +1263,15 @@ async function loadDemo() {
   const payment = (name) => state.paymentMethods.find((item) => item.name === name)?.id || state.paymentMethods[0]?.id;
   const timestamp = nowIso();
   const records = {
-    salary: { id: `demo-salary-${state.month}`, month: state.month, amountCents: 400000, status: "received", notes: "Dado de demonstração", origin: "demo", createdAt: timestamp, updatedAt: timestamp, version: 1 },
+    salary: { id: `demo-salary-${state.activeProfileId}-${state.month}`, profileId: state.activeProfileId, month: state.month, amountCents: 400000, status: "received", notes: "Dado de demonstração", origin: "demo", createdAt: timestamp, updatedAt: timestamp, version: 1 },
     recurring: [
-      { id: "demo-rec-rent", description: "Aluguel", amountCents: 100000, categoryId: category("Moradia"), paymentMethodId: payment("Pix"), dueDay: 5, startDate: `${state.month}-01`, endDate: null, active: true, notes: "Dado de demonstração", origin: "demo", createdAt: timestamp, updatedAt: timestamp, version: 1 },
-      { id: "demo-rec-internet", description: "Internet", amountCents: 10000, categoryId: category("Assinaturas"), paymentMethodId: payment("Débito automático"), dueDay: 12, startDate: `${state.month}-01`, endDate: null, active: true, notes: "Dado de demonstração", origin: "demo", createdAt: timestamp, updatedAt: timestamp, version: 1 },
-      { id: "demo-rec-energy", description: "Energia", amountCents: 25000, categoryId: category("Moradia"), paymentMethodId: payment("Boleto"), dueDay: 18, startDate: `${state.month}-01`, endDate: null, active: true, notes: "Dado de demonstração", origin: "demo", createdAt: timestamp, updatedAt: timestamp, version: 1 }
+      { id: `demo-rec-rent-${state.activeProfileId}`, profileId: state.activeProfileId, description: "Aluguel", amountCents: 100000, categoryId: category("Moradia"), paymentMethodId: payment("Pix"), dueDay: 5, startDate: `${state.month}-01`, endDate: null, active: true, notes: "Dado de demonstração", origin: "demo", createdAt: timestamp, updatedAt: timestamp, version: 1 },
+      { id: `demo-rec-internet-${state.activeProfileId}`, profileId: state.activeProfileId, description: "Internet", amountCents: 10000, categoryId: category("Assinaturas"), paymentMethodId: payment("Débito automático"), dueDay: 12, startDate: `${state.month}-01`, endDate: null, active: true, notes: "Dado de demonstração", origin: "demo", createdAt: timestamp, updatedAt: timestamp, version: 1 },
+      { id: `demo-rec-energy-${state.activeProfileId}`, profileId: state.activeProfileId, description: "Energia", amountCents: 25000, categoryId: category("Moradia"), paymentMethodId: payment("Boleto"), dueDay: 18, startDate: `${state.month}-01`, endDate: null, active: true, notes: "Dado de demonstração", origin: "demo", createdAt: timestamp, updatedAt: timestamp, version: 1 }
     ],
     expenses: [
-      { id: `demo-food-${state.month}`, month: state.month, description: "Alimentação do mês", amountCents: 50000, categoryId: category("Alimentação"), paymentMethodId: payment("Cartão de débito"), date: `${state.month}-08`, status: "paid", notes: "Dado de demonstração", origin: "demo", createdAt: timestamp, updatedAt: timestamp, version: 1 },
-      { id: `demo-transport-${state.month}`, month: state.month, description: "Transporte", amountCents: 30000, categoryId: category("Transporte"), paymentMethodId: payment("Pix"), date: `${state.month}-10`, status: "paid", notes: "Dado de demonstração", origin: "demo", createdAt: timestamp, updatedAt: timestamp, version: 1 }
+      { id: `demo-food-${state.activeProfileId}-${state.month}`, profileId: state.activeProfileId, month: state.month, description: "Alimentação do mês", amountCents: 50000, categoryId: category("Alimentação"), paymentMethodId: payment("Cartão de débito"), date: `${state.month}-08`, status: "paid", notes: "Dado de demonstração", origin: "demo", createdAt: timestamp, updatedAt: timestamp, version: 1 },
+      { id: `demo-transport-${state.activeProfileId}-${state.month}`, profileId: state.activeProfileId, month: state.month, description: "Transporte", amountCents: 30000, categoryId: category("Transporte"), paymentMethodId: payment("Pix"), date: `${state.month}-10`, status: "paid", notes: "Dado de demonstração", origin: "demo", createdAt: timestamp, updatedAt: timestamp, version: 1 }
     ]
   };
   await putRecord("monthlyIncomes", records.salary);
@@ -906,13 +1283,14 @@ async function loadDemo() {
 }
 
 async function removeDemo() {
+  if (isAllProfiles()) return toast("Escolha um perfil específico para remover a demonstração.", "error");
   const confirmed = await confirmAction({
     title: "Apagar dados de demonstração?",
     message: "Somente os registros identificados como demonstração serão removidos.",
     confirmLabel: "Apagar demonstração"
   });
   if (!confirmed) return;
-  await deleteDemoData();
+  await deleteDemoData(state.activeProfileId);
   toast("Dados de demonstração removidos.");
   await loadMonth();
 }
@@ -931,7 +1309,9 @@ async function deleteAllData() {
   });
   if (!confirmed) return;
   await clearDatabase();
-  await seedDefaults();
+  state.activeProfileId = DEFAULT_PROFILE_ID;
+  localStorage.setItem(ACTIVE_PROFILE_KEY, DEFAULT_PROFILE_ID);
+  await seedDefaults(DEFAULT_PROFILE_ID);
   toast("Todos os dados financeiros foram apagados.");
   await loadMonth();
 }
@@ -1056,6 +1436,12 @@ function bindEvents() {
   });
   dom.menuButton.addEventListener("click", () => dom.sidebar.classList.contains("open") ? closeMenu() : openMenu());
   dom.scrim.addEventListener("click", closeMenu);
+  dom.profilePicker.addEventListener("change", async () => {
+    state.activeProfileId = dom.profilePicker.value;
+    localStorage.setItem(ACTIVE_PROFILE_KEY, state.activeProfileId);
+    if (dom.reportProfile) dom.reportProfile.value = state.activeProfileId;
+    await loadMonth();
+  });
   dom.monthPicker.addEventListener("change", async () => {
     if (!dom.monthPicker.value) return;
     state.month = dom.monthPicker.value;
@@ -1067,6 +1453,49 @@ function bindEvents() {
   dom.expenseFilters.addEventListener("input", renderExpenses);
   dom.expenseFilters.addEventListener("change", renderExpenses);
   dom.clearExpenseFilters.addEventListener("click", () => { dom.expenseFilters.reset(); renderExpenses(); });
+  let reportRenderTimer;
+  const updateReport = () => {
+    clearTimeout(reportRenderTimer);
+    reportRenderTimer = setTimeout(() => {
+      $$(".report-custom-date").forEach((field) => { field.hidden = dom.reportPeriod.value !== "custom"; });
+      renderReports().catch((error) => toast(error.message, "error"));
+    }, 120);
+  };
+  dom.reportFilters.addEventListener("input", updateReport);
+  dom.reportFilters.addEventListener("change", (event) => {
+    if (event.target === dom.reportProfile) {
+      dom.reportCategory.value = "";
+      dom.reportPayment.value = "";
+      renderReportFilterOptions();
+    }
+    updateReport();
+  });
+  dom.clearReportFilters.addEventListener("click", () => {
+    dom.reportFilters.reset();
+    dom.reportProfile.value = state.activeProfileId;
+    dom.reportStart.value = "";
+    dom.reportEnd.value = "";
+    renderReportFilterOptions();
+    updateReport();
+  });
+  dom.saveReportPreset.addEventListener("click", saveReportPreset);
+  dom.reportPreset.addEventListener("change", () => {
+    dom.deleteReportPreset.disabled = !dom.reportPreset.value;
+    if (dom.reportPreset.value) applyReportPreset(dom.reportPreset.value);
+  });
+  dom.deleteReportPreset.addEventListener("click", deleteReportPreset);
+  dom.exportReportCsv.addEventListener("click", async () => {
+    try {
+      const { records } = await getFilteredReportRecords();
+      const count = await saveCsv({
+        scope: "all", type: "expenses", month: state.month,
+        expenseRecords: records, filenamePrefix: "relatorio-financeiro-filtrado"
+      });
+      toast(`Relatório exportado com ${count} gasto(s).`);
+    } catch (error) {
+      toast(error.message, "error");
+    }
+  });
   dom.editorFields.addEventListener("blur", (event) => {
     if (event.target.dataset.money) {
       try { event.target.value = formatMoneyInput(parseMoneyToCents(event.target.value)); } catch { /* validation happens on submit */ }
@@ -1107,8 +1536,16 @@ function bindEvents() {
     try {
       const password = dom.encryptBackup.checked ? dom.backupPassword.value : "";
       if (password && password.length < 8) throw new Error("Use pelo menos 8 caracteres na senha do backup.");
+      const currentOnly = dom.backupScope.value === "current";
+      if (currentOnly && isAllProfiles()) throw new Error("Escolha um perfil específico ou exporte todos os perfis.");
       dom.exportJsonButton.disabled = true;
-      await saveBackup({ password });
+      await saveBackup({
+        password,
+        profileId: currentOnly ? state.activeProfileId : "",
+        profileName: currentOnly ? activeProfile()?.name || "" : ""
+      });
+      localStorage.setItem(LAST_BACKUP_KEY, nowIso());
+      renderDashboardNotices();
       toast(password ? "Backup protegido exportado." : "Backup exportado.");
       dom.backupPassword.value = "";
     } catch (error) { toast(error.message, "error"); }
@@ -1124,7 +1561,7 @@ function bindEvents() {
   });
   dom.exportCsvButton.addEventListener("click", async () => {
     try {
-      const count = await saveCsv({ scope: dom.csvScope.value, type: dom.csvType.value, month: state.month });
+      const count = await saveCsv({ scope: dom.csvScope.value, type: dom.csvType.value, month: state.month, profileId: state.activeProfileId });
       toast(`CSV exportado com ${count} lançamento(s).`);
     } catch (error) { toast(error.message, "error"); }
   });
@@ -1155,6 +1592,7 @@ function bindEvents() {
   window.addEventListener("offline", updateOnlineStatus);
   updateOnlineStatus();
   window.addEventListener("resize", () => {
+    if (!state.metrics) return;
     if (state.view === "dashboard") renderDashboard();
     if (state.view === "reports") renderReports();
   });
@@ -1163,11 +1601,14 @@ function bindEvents() {
 function mapDom() {
   Object.assign(dom, {
     sidebar: $("#sidebar"), menuButton: $("#menu-button"), scrim: $("#scrim"),
+    profilePicker: $("#profile-picker"),
     monthPicker: $("#month-picker"), previousMonth: $("#previous-month"), nextMonth: $("#next-month"),
     dashboardMonthLabel: $("#dashboard-month-label"), balanceBanner: $("#balance-banner"),
     balanceIcon: $("#balance-icon"), balanceStatus: $("#balance-status"), balanceMessage: $("#balance-message"),
     balanceValue: $("#balance-value"), dashboardMetrics: $("#dashboard-metrics"),
     dashboardChart: $("#dashboard-chart"), dashboardChartSummary: $("#dashboard-chart-summary"),
+    backupReminder: $("#backup-reminder"), backupReminderText: $("#backup-reminder-text"),
+    undatedExpensesPanel: $("#undated-expenses-panel"), undatedExpensesText: $("#undated-expenses-text"),
     recentTransactions: $("#recent-transactions"), incomeMetrics: $("#income-metrics"), salaryCard: $("#salary-card"),
     copySalaryButton: $("#copy-salary-button"), incomeTableBody: $("#income-table-body"), incomeEmpty: $("#income-empty"),
     recurringMetrics: $("#recurring-metrics"), instanceTableBody: $("#instance-table-body"), instanceEmpty: $("#instance-empty"),
@@ -1175,17 +1616,24 @@ function mapDom() {
     expenseFilters: $("#expense-filters"), expenseCategoryFilter: $("#expense-category-filter"),
     expensePaymentFilter: $("#expense-payment-filter"), expenseMetrics: $("#expense-metrics"),
     expenseTableBody: $("#expense-table-body"), expenseEmpty: $("#expense-empty"), clearExpenseFilters: $("#clear-expense-filters"),
-    categoryList: $("#category-list"), paymentList: $("#payment-list"),
+    categoryList: $("#category-list"), paymentList: $("#payment-list"), profileList: $("#profile-list"),
+    reportFilters: $("#report-filters"), reportPeriod: $("#report-period"), reportProfile: $("#report-profile"),
+    reportCategory: $("#report-category"), reportPayment: $("#report-payment"), reportStart: $("#report-start"), reportEnd: $("#report-end"),
+    clearReportFilters: $("#clear-report-filters"), reportPreset: $("#report-preset"),
+    saveReportPreset: $("#save-report-preset"), deleteReportPreset: $("#delete-report-preset"),
+    exportReportCsv: $("#export-report-csv"), reportMetrics: $("#report-metrics"),
     categoryReportChart: $("#category-report-chart"), categoryReportSummary: $("#category-report-summary"),
     expenseTypeChart: $("#expense-type-chart"), expenseTypeSummary: $("#expense-type-summary"),
     incomeExpenseChart: $("#income-expense-chart"), incomeExpenseSummary: $("#income-expense-summary"),
     balanceHistoryChart: $("#balance-history-chart"), balanceHistorySummary: $("#balance-history-summary"),
-    largestExpenses: $("#largest-expenses"),
+    paymentStatusChart: $("#payment-status-chart"), paymentStatusSummary: $("#payment-status-summary"),
+    expenseHistoryChart: $("#expense-history-chart"), expenseHistorySummary: $("#expense-history-summary"),
+    largestExpenses: $("#largest-expenses"), reportExpenseBody: $("#report-expense-body"), reportExpenseEmpty: $("#report-expense-empty"),
     editorDialog: $("#editor-dialog"), editorForm: $("#editor-form"), editorKicker: $("#editor-kicker"),
     editorTitle: $("#editor-title"), editorFields: $("#editor-fields"), editorError: $("#editor-error"), editorSubmit: $("#editor-submit"),
     confirmDialog: $("#confirm-dialog"), confirmForm: $("#confirm-form"), confirmTitle: $("#confirm-title"),
     confirmMessage: $("#confirm-message"), confirmExtra: $("#confirm-extra"), confirmSubmit: $("#confirm-submit"),
-    encryptBackup: $("#encrypt-backup"), backupPasswordField: $("#backup-password-field"), backupPassword: $("#backup-password"),
+    backupScope: $("#backup-scope"), encryptBackup: $("#encrypt-backup"), backupPasswordField: $("#backup-password-field"), backupPassword: $("#backup-password"),
     exportJsonButton: $("#export-json-button"), importFile: $("#import-file"), reviewImportButton: $("#review-import-button"),
     importDialog: $("#import-dialog"), importForm: $("#import-form"), importSummary: $("#import-summary"),
     importPasswordField: $("#import-password-field"), importPassword: $("#import-password"),

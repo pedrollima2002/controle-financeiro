@@ -7,11 +7,16 @@ Aplicação web estática de controle financeiro pessoal. Funciona sem conta, ba
 - dashboard mensal com saldos previsto e realizado;
 - salário mensal, receitas extras e status recebido/pendente;
 - gastos fixos recorrentes com ocorrências independentes por mês;
+- vencimento opcional em gastos fixos, com destaque para pendências sem data;
 - gastos avulsos com pesquisa, período, filtros, ordenação e duplicação;
+- múltiplos perfis financeiros locais, sem login, com troca imediata e visão consolidada;
 - categorias e formas de pagamento personalizáveis;
 - histórico por seletor de mês;
+- relatórios detalhados com filtros combináveis por período, perfil, categoria, pagamento, tipo, status e descrição;
+- filtros de relatório salvos no navegador, totais filtrados e exportação do resultado em CSV;
 - gráficos nativos em Canvas com resumos textuais;
 - backup JSON, backup protegido por PBKDF2 + AES-GCM e restauração por mesclagem ou substituição;
+- backup de todos os perfis ou somente do perfil atual, com lembrete periódico;
 - exportação CSV com ponto e vírgula;
 - modo claro, escuro e automático;
 - PWA instalável e funcionamento offline após o primeiro acesso;
@@ -53,18 +58,19 @@ controle-financeiro/
 
 ## Modelo de dados
 
-O banco `meu-controle-financeiro` usa IndexedDB, versão 1. Cada store tem chave primária `id`; os lançamentos incluem `createdAt`, `updatedAt`, `version` e `origin` quando aplicável.
+O banco `meu-controle-financeiro` usa IndexedDB, versão 2. A atualização da versão 1 é automática: registros existentes recebem o perfil **Pessoal** e não são apagados. Cada store tem chave primária `id`; os lançamentos incluem `profileId`, `createdAt`, `updatedAt`, `version` e `origin` quando aplicável.
 
 | Store | Finalidade | Índices principais |
 |---|---|---|
 | `settings` | configurações futuras sincronizadas com o banco | chave `id` |
-| `categories` | nome, ícone, cor, tipo e estado | `active`, `name` |
-| `paymentMethods` | formas de pagamento | `active`, `name` |
-| `monthlyIncomes` | salário líquido de cada mês | `month`, `status` |
-| `additionalIncomes` | outras receitas | `month`, `date`, `categoryId`, `status` |
-| `recurringExpenses` | regras de recorrência | `active`, `categoryId`, `startDate` |
-| `monthlyExpenseInstances` | cópias mensais históricas dos gastos fixos | `month`, `date`, `categoryId`, `status`, `recurringId`, `occurrenceKey` |
-| `oneTimeExpenses` | gastos avulsos | `month`, `date`, `categoryId`, `paymentMethodId`, `status` |
+| `profiles` | perfis financeiros locais | `name` |
+| `categories` | nome, ícone, cor, tipo e estado por perfil | `profileId`, `profileActive`, `active`, `name` |
+| `paymentMethods` | formas de pagamento por perfil | `profileId`, `profileActive`, `active`, `name` |
+| `monthlyIncomes` | salário líquido de cada mês e perfil | `profileId`, `profileMonth`, `month`, `status` |
+| `additionalIncomes` | outras receitas por perfil | `profileId`, `profileMonth`, `month`, `date`, `categoryId`, `status` |
+| `recurringExpenses` | regras de recorrência por perfil | `profileId`, `profileActive`, `active`, `categoryId`, `startDate` |
+| `monthlyExpenseInstances` | cópias mensais históricas dos gastos fixos | `profileId`, `profileMonth`, `month`, `date`, `categoryId`, `status`, `recurringId`, `occurrenceKey` |
+| `oneTimeExpenses` | gastos avulsos por perfil | `profileId`, `profileMonth`, `month`, `date`, `categoryId`, `paymentMethodId`, `status` |
 | `appMetadata` | versão e metadados técnicos | chave `id` |
 
 Valores monetários são inteiros em centavos. `R$ 32,50` é armazenado como `3250`. O mês de referência usa `AAAA-MM`.
@@ -72,6 +78,8 @@ Valores monetários são inteiros em centavos. `R$ 32,50` é armazenado como `32
 ### Recorrências e histórico
 
 Cada ocorrência fixa usa a chave única `recurringId:mês`. Essa restrição existe no próprio IndexedDB e evita duplicações mesmo se duas rotinas tentarem gerar o mesmo mês. A ocorrência copia descrição, valor, categoria, pagamento e observação da recorrência no momento da geração.
+
+O dia do vencimento pode ficar vazio. Nesse caso, a ocorrência continua no mês de referência, aparece como **Sem vencimento**, não recebe uma data artificial e pode ser marcada como paga normalmente.
 
 Editar a recorrência muda os próximos meses ainda não gerados. A opção **Aplicar valores também à ocorrência do mês selecionado** altera a cópia atual. Ocorrências históricas permanecem independentes. Excluir uma recorrência não apaga ocorrências já geradas.
 
@@ -117,7 +125,7 @@ O repositório hospeda somente os arquivos da aplicação. Os lançamentos ficam
 
 Em **Backup**:
 
-1. Clique em **Exportar backup completo** para salvar JSON.
+1. Escolha se deseja incluir todos os perfis ou apenas o perfil atual e clique em **Exportar backup completo** para salvar JSON.
 2. Para proteção adicional, marque a opção de senha e use pelo menos 8 caracteres.
 3. Guarde o arquivo fora da pasta de downloads se ele for importante.
 4. Para restaurar, selecione o JSON e clique em **Revisar arquivo**.
@@ -130,7 +138,7 @@ Se a senha de um backup protegido for perdida, não há recuperação. A criptog
 
 ## Exportar CSV
 
-Escolha todos os meses ou apenas o mês selecionado e filtre por receitas/despesas. O arquivo usa UTF-8 com BOM e separador `;`, adequado ao padrão de planilhas em português do Brasil.
+Escolha todos os meses ou apenas o mês selecionado e filtre por receitas/despesas. No relatório, o botão **Exportar resultado em CSV** respeita todos os filtros combinados. O arquivo identifica o perfil de cada lançamento, usa UTF-8 com BOM e separador `;`, adequado ao padrão de planilhas em português do Brasil.
 
 ## Atualizar a aplicação
 
@@ -151,16 +159,19 @@ O executor em `tests/` verifica:
 - saldos previsto e realizado;
 - agrupamento por categoria;
 - intervalo, geração e ajuste de recorrências;
+- recorrências sem vencimento;
 - prevenção de ocorrências duplicadas;
-- validação de backup;
+- validação e migração de backup antigo;
 - mesclagem por identificador;
-- filtro mensal.
+- filtro mensal;
+- soma consolidada de perfis;
+- filtros combináveis e resumo de despesas.
 
-Abra `/tests/` pelo mesmo servidor local. O resultado esperado é `12 de 12 testes passaram`.
+Abra `/tests/` pelo mesmo servidor local. O resultado esperado é `17 de 17 testes passaram`.
 
 ## Compatibilidade e limites
 
-Prioriza versões modernas de Chrome, Edge, Firefox, Safari e navegadores móveis. O botão de instalação depende do suporte do navegador. IndexedDB é obrigatório; se ele estiver desativado ou indisponível, a interface mostrará uma mensagem de erro. A versão inicial não inclui investimentos, juros, parcelamento de fatura ou integração bancária.
+Prioriza versões modernas de Chrome, Edge, Firefox, Safari e navegadores móveis. O botão de instalação depende do suporte do navegador. IndexedDB é obrigatório; se ele estiver desativado ou indisponível, a interface mostrará uma mensagem de erro. Os perfis ficam no mesmo navegador e não sincronizam entre dispositivos. A aplicação não inclui investimentos, juros, parcelamento de fatura ou integração bancária.
 
 ## Licença
 

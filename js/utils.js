@@ -1,5 +1,5 @@
 export const APP_NAME = "Meu Controle Financeiro";
-export const BACKUP_VERSION = 1;
+export const BACKUP_VERSION = 2;
 
 export function uid() {
   if (globalThis.crypto?.randomUUID) return crypto.randomUUID();

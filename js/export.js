@@ -1,5 +1,5 @@
 import { BACKUP_VERSION, downloadBlob, formatCurrency, formatDate, localBackupDate, monthFromDate, nowIso } from "./utils.js";
-import { STORES, exportDatabase, importDatabase } from "./database.js";
+import { DEFAULT_PROFILE_ID, STORES, exportDatabase, importDatabase } from "./database.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -58,14 +58,25 @@ export async function decryptBackup(wrapper, password) {
   }
 }
 
-export async function createBackup() {
+const PROFILE_STORES = new Set([
+  "categories", "paymentMethods", "monthlyIncomes", "additionalIncomes",
+  "recurringExpenses", "monthlyExpenseInstances", "oneTimeExpenses"
+]);
+
+export async function createBackup({ profileId = "" } = {}) {
+  const data = await exportDatabase();
+  if (profileId) {
+    PROFILE_STORES.forEach((store) => { data[store] = data[store].filter((record) => record.profileId === profileId); });
+    data.profiles = data.profiles.filter((record) => record.id === profileId);
+  }
   return {
     format: "controle-financeiro",
     formatVersion: BACKUP_VERSION,
     exportedAt: nowIso(),
     locale: "pt-BR",
     currency: "BRL",
-    data: await exportDatabase()
+    scope: profileId ? "profile" : "all",
+    data
   };
 }
 
@@ -73,9 +84,10 @@ export function validateBackup(backup) {
   const errors = [];
   if (!backup || typeof backup !== "object") errors.push("O conteúdo não é um objeto JSON.");
   if (backup?.format !== "controle-financeiro") errors.push("O arquivo não pertence a este aplicativo.");
-  if (backup?.formatVersion !== BACKUP_VERSION) errors.push(`A versão ${backup?.formatVersion ?? "desconhecida"} não é compatível com a versão ${BACKUP_VERSION}.`);
+  if (![1, BACKUP_VERSION].includes(backup?.formatVersion)) errors.push(`A versão ${backup?.formatVersion ?? "desconhecida"} não é compatível com a versão ${BACKUP_VERSION}.`);
   if (!backup?.data || typeof backup.data !== "object") errors.push("A seção de dados está ausente.");
   for (const store of STORES) {
+    if (store === "profiles" && backup?.formatVersion === 1) continue;
     if (!Array.isArray(backup?.data?.[store])) errors.push(`A coleção ${store} está ausente ou é inválida.`);
   }
   const invalidRecords = STORES.flatMap((store) => (backup?.data?.[store] || []).filter((record) => !record || typeof record.id !== "string"));
@@ -83,8 +95,25 @@ export function validateBackup(backup) {
   return { valid: errors.length === 0, errors };
 }
 
+export function normalizeBackup(backup) {
+  const validation = validateBackup(backup);
+  if (!validation.valid) throw new Error(validation.errors.join(" "));
+  if (backup.formatVersion === BACKUP_VERSION) return backup;
+  const timestamp = backup.exportedAt || nowIso();
+  const data = Object.fromEntries(STORES.map((store) => [store, [...(backup.data[store] || [])]]));
+  data.profiles = [{
+    id: DEFAULT_PROFILE_ID, name: "Pessoal", icon: "👤", color: "#0f766e",
+    createdAt: timestamp, updatedAt: timestamp, version: 1
+  }];
+  PROFILE_STORES.forEach((store) => {
+    data[store] = data[store].map((record) => ({ ...record, profileId: record.profileId || DEFAULT_PROFILE_ID }));
+  });
+  return { ...backup, formatVersion: BACKUP_VERSION, migratedFromVersion: 1, data };
+}
+
 export function backupSummary(backup) {
   const labels = {
+    profiles: "perfis",
     categories: "categorias",
     paymentMethods: "pagamentos",
     monthlyIncomes: "salários",
@@ -102,17 +131,17 @@ export function mergeRecordsById(currentRecords, incomingRecords) {
   return [...merged.values()];
 }
 
-export async function saveBackup({ password = "" } = {}) {
-  const backup = await createBackup();
+export async function saveBackup({ password = "", profileId = "", profileName = "" } = {}) {
+  const backup = await createBackup({ profileId });
   const content = password ? await encryptBackup(backup, password) : backup;
   const suffix = password ? "-protegido" : "";
-  downloadBlob(JSON.stringify(content, null, 2), `controle-financeiro-backup-${localBackupDate()}${suffix}.json`, "application/json;charset=utf-8");
+  const scope = profileName ? `-${profileName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}` : "";
+  downloadBlob(JSON.stringify(content, null, 2), `controle-financeiro-backup${scope}-${localBackupDate()}${suffix}.json`, "application/json;charset=utf-8");
 }
 
 export async function restoreBackup(backup, mode) {
-  const validation = validateBackup(backup);
-  if (!validation.valid) throw new Error(validation.errors.join(" "));
-  await importDatabase(backup.data, mode);
+  const normalized = normalizeBackup(backup);
+  await importDatabase(normalized.data, mode);
 }
 
 function csvEscape(value) {
@@ -120,8 +149,9 @@ function csvEscape(value) {
   return `"${text}"`;
 }
 
-function rowFor(record, type, categoryNames, paymentNames) {
+function rowFor(record, type, categoryNames, paymentNames, profileNames) {
   return [
+    profileNames.get(record.profileId) || "Pessoal",
     record.month || monthFromDate(record.date),
     formatDate(record.date),
     type,
@@ -134,23 +164,30 @@ function rowFor(record, type, categoryNames, paymentNames) {
   ].map(csvEscape).join(";");
 }
 
-export async function saveCsv({ scope = "all", type = "all", month }) {
+export async function saveCsv({ scope = "all", type = "all", month, profileId = "", expenseRecords = null, filenamePrefix = "controle-financeiro" }) {
   const data = await exportDatabase();
   const categoryNames = new Map(data.categories.map((record) => [record.id, record.name]));
   const paymentNames = new Map(data.paymentMethods.map((record) => [record.id, record.name]));
+  const profileNames = new Map(data.profiles.map((record) => [record.id, record.name]));
   const rows = [];
-  const include = (record) => scope === "all" || (record.month || monthFromDate(record.date)) === month;
+  const include = (record) =>
+    (!profileId || profileId === "__all__" || record.profileId === profileId) &&
+    (scope === "all" || (record.month || monthFromDate(record.date)) === month);
   if (type !== "expenses") {
-    data.monthlyIncomes.filter(include).forEach((record) => rows.push(rowFor({ ...record, date: `${record.month}-01` }, "Salário", categoryNames, paymentNames)));
-    data.additionalIncomes.filter(include).forEach((record) => rows.push(rowFor(record, "Receita", categoryNames, paymentNames)));
+    data.monthlyIncomes.filter(include).forEach((record) => rows.push(rowFor({ ...record, date: `${record.month}-01` }, "Salário", categoryNames, paymentNames, profileNames)));
+    data.additionalIncomes.filter(include).forEach((record) => rows.push(rowFor(record, "Receita", categoryNames, paymentNames, profileNames)));
   }
   if (type !== "incomes") {
-    data.monthlyExpenseInstances.filter(include).forEach((record) => rows.push(rowFor(record, "Despesa fixa", categoryNames, paymentNames)));
-    data.oneTimeExpenses.filter(include).forEach((record) => rows.push(rowFor(record, "Despesa avulsa", categoryNames, paymentNames)));
+    if (Array.isArray(expenseRecords)) {
+      expenseRecords.forEach((record) => rows.push(rowFor(record, record.expenseType === "fixed" ? "Despesa fixa" : "Despesa avulsa", categoryNames, paymentNames, profileNames)));
+    } else {
+      data.monthlyExpenseInstances.filter(include).forEach((record) => rows.push(rowFor(record, "Despesa fixa", categoryNames, paymentNames, profileNames)));
+      data.oneTimeExpenses.filter(include).forEach((record) => rows.push(rowFor(record, "Despesa avulsa", categoryNames, paymentNames, profileNames)));
+    }
   }
-  const header = ["Mês", "Data", "Tipo", "Descrição", "Categoria", "Forma de pagamento", "Status", "Valor", "Observação"].map(csvEscape).join(";");
+  const header = ["Perfil", "Mês", "Data", "Tipo", "Descrição", "Categoria", "Forma de pagamento", "Status", "Valor", "Observação"].map(csvEscape).join(";");
   const content = `\uFEFF${[header, ...rows].join("\r\n")}`;
   const scopeSuffix = scope === "month" ? `-${month}` : "-todos";
-  downloadBlob(content, `controle-financeiro${scopeSuffix}-${localBackupDate()}.csv`, "text/csv;charset=utf-8");
+  downloadBlob(content, `${filenamePrefix}${scopeSuffix}-${localBackupDate()}.csv`, "text/csv;charset=utf-8");
   return rows.length;
 }

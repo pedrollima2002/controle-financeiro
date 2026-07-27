@@ -1,4 +1,4 @@
-import { addRecord, getAll, getByIndex } from "./database.js";
+import { addRecord, getAll, getByIndex, getByProfile } from "./database.js";
 import { compareMonths, dateForMonthAndDay, monthFromDate, nowIso, uid } from "./utils.js";
 
 export function shouldGenerateForMonth(recurring, month) {
@@ -9,10 +9,12 @@ export function shouldGenerateForMonth(recurring, month) {
 }
 
 export function createOccurrence(recurring, month) {
-  const date = dateForMonthAndDay(month, recurring.dueDay);
+  const dueDay = Number.isInteger(recurring.dueDay) ? recurring.dueDay : null;
+  const date = dueDay ? dateForMonthAndDay(month, dueDay) : null;
   const timestamp = nowIso();
   return {
     id: uid(),
+    profileId: recurring.profileId,
     recurringId: recurring.id,
     occurrenceKey: `${recurring.id}:${month}`,
     month,
@@ -21,7 +23,7 @@ export function createOccurrence(recurring, month) {
     categoryId: recurring.categoryId,
     paymentMethodId: recurring.paymentMethodId,
     date,
-    dueDay: recurring.dueDay,
+    dueDay,
     status: "pending",
     paidDate: null,
     notes: recurring.notes || "",
@@ -41,12 +43,15 @@ export function generateMissingOccurrences(recurringExpenses, existingInstances,
     .filter((instance) => !existingKeys.has(instance.occurrenceKey));
 }
 
-export async function ensureOccurrencesForMonth(month) {
+export async function ensureOccurrencesForMonth(month, profileId = "") {
   const [recurringExpenses, existingInstances] = await Promise.all([
-    getAll("recurringExpenses"),
+    profileId ? getByProfile("recurringExpenses", profileId) : getAll("recurringExpenses"),
     getByIndex("monthlyExpenseInstances", "month", month)
   ]);
-  const missing = generateMissingOccurrences(recurringExpenses, existingInstances, month);
+  const scopedInstances = profileId
+    ? existingInstances.filter((record) => record.profileId === profileId)
+    : existingInstances;
+  const missing = generateMissingOccurrences(recurringExpenses, scopedInstances, month);
   let created = 0;
   for (const occurrence of missing) {
     try {

@@ -1,9 +1,11 @@
 import { nowIso, uid } from "./utils.js";
 
 export const DB_NAME = "meu-controle-financeiro";
-export const DB_VERSION = 1;
+export const DB_VERSION = 2;
+export const DEFAULT_PROFILE_ID = "profile-default";
 export const STORES = [
   "settings",
+  "profiles",
   "categories",
   "paymentMethods",
   "monthlyIncomes",
@@ -36,11 +38,43 @@ const DEFAULT_PAYMENT_METHODS = [
 
 let databasePromise;
 
-function createStore(database, name, indexes = []) {
-  if (database.objectStoreNames.contains(name)) return database.transaction.objectStore(name);
+const PROFILE_STORES = [
+  "categories", "paymentMethods", "monthlyIncomes", "additionalIncomes",
+  "recurringExpenses", "monthlyExpenseInstances", "oneTimeExpenses"
+];
+
+function createStore(database, transaction, name, indexes = []) {
+  if (database.objectStoreNames.contains(name)) return transaction.objectStore(name);
   const store = database.createObjectStore(name, { keyPath: "id" });
   indexes.forEach(([indexName, keyPath, options]) => store.createIndex(indexName, keyPath, options));
   return store;
+}
+
+function addIndex(store, indexName, keyPath, options) {
+  if (!store.indexNames.contains(indexName)) store.createIndex(indexName, keyPath, options);
+}
+
+function addProfileIndexesAndMigrate(transaction) {
+  const profileIndexes = {
+    categories: [["profileId", "profileId"], ["profileActive", ["profileId", "active"]]],
+    paymentMethods: [["profileId", "profileId"], ["profileActive", ["profileId", "active"]]],
+    monthlyIncomes: [["profileId", "profileId"], ["profileMonth", ["profileId", "month"]]],
+    additionalIncomes: [["profileId", "profileId"], ["profileMonth", ["profileId", "month"]]],
+    recurringExpenses: [["profileId", "profileId"], ["profileActive", ["profileId", "active"]]],
+    monthlyExpenseInstances: [["profileId", "profileId"], ["profileMonth", ["profileId", "month"]]],
+    oneTimeExpenses: [["profileId", "profileId"], ["profileMonth", ["profileId", "month"]]]
+  };
+  PROFILE_STORES.forEach((storeName) => {
+    const store = transaction.objectStore(storeName);
+    profileIndexes[storeName].forEach(([name, keyPath, options]) => addIndex(store, name, keyPath, options));
+    const cursorRequest = store.openCursor();
+    cursorRequest.onsuccess = () => {
+      const cursor = cursorRequest.result;
+      if (!cursor) return;
+      if (!cursor.value.profileId) cursor.update({ ...cursor.value, profileId: DEFAULT_PROFILE_ID });
+      cursor.continue();
+    };
+  });
 }
 
 export function openDatabase() {
@@ -52,22 +86,29 @@ export function openDatabase() {
     request.onupgradeneeded = (event) => {
       const database = request.result;
       const transaction = request.transaction;
-      database.transaction = transaction;
       if (event.oldVersion < 1) {
-        createStore(database, "settings");
-        createStore(database, "categories", [["active", "active"], ["name", "name"]]);
-        createStore(database, "paymentMethods", [["active", "active"], ["name", "name"]]);
-        createStore(database, "monthlyIncomes", [["month", "month"], ["status", "status"]]);
-        createStore(database, "additionalIncomes", [["month", "month"], ["date", "date"], ["categoryId", "categoryId"], ["status", "status"]]);
-        createStore(database, "recurringExpenses", [["active", "active"], ["categoryId", "categoryId"], ["startDate", "startDate"]]);
-        createStore(database, "monthlyExpenseInstances", [
+        createStore(database, transaction, "settings");
+        createStore(database, transaction, "categories", [["active", "active"], ["name", "name"]]);
+        createStore(database, transaction, "paymentMethods", [["active", "active"], ["name", "name"]]);
+        createStore(database, transaction, "monthlyIncomes", [["month", "month"], ["status", "status"]]);
+        createStore(database, transaction, "additionalIncomes", [["month", "month"], ["date", "date"], ["categoryId", "categoryId"], ["status", "status"]]);
+        createStore(database, transaction, "recurringExpenses", [["active", "active"], ["categoryId", "categoryId"], ["startDate", "startDate"]]);
+        createStore(database, transaction, "monthlyExpenseInstances", [
           ["month", "month"], ["date", "date"], ["categoryId", "categoryId"], ["status", "status"],
           ["recurringId", "recurringId"], ["occurrenceKey", "occurrenceKey", { unique: true }]
         ]);
-        createStore(database, "oneTimeExpenses", [["month", "month"], ["date", "date"], ["categoryId", "categoryId"], ["paymentMethodId", "paymentMethodId"], ["status", "status"]]);
-        createStore(database, "appMetadata");
+        createStore(database, transaction, "oneTimeExpenses", [["month", "month"], ["date", "date"], ["categoryId", "categoryId"], ["paymentMethodId", "paymentMethodId"], ["status", "status"]]);
+        createStore(database, transaction, "appMetadata");
       }
-      delete database.transaction;
+      if (event.oldVersion < 2) {
+        const profiles = createStore(database, transaction, "profiles", [["name", "name"]]);
+        const timestamp = nowIso();
+        profiles.put({
+          id: DEFAULT_PROFILE_ID, name: "Pessoal", icon: "👤", color: "#0f766e",
+          createdAt: timestamp, updatedAt: timestamp, version: 1
+        });
+        addProfileIndexesAndMigrate(transaction);
+      }
     };
     request.onsuccess = () => {
       const database = request.result;
@@ -107,6 +148,14 @@ export async function getByIndex(storeName, indexName, value) {
   const database = await openDatabase();
   const index = database.transaction(storeName, "readonly").objectStore(storeName).index(indexName);
   return requestResult(index.getAll(IDBKeyRange.only(value)));
+}
+
+export async function getByProfile(storeName, profileId) {
+  return getByIndex(storeName, "profileId", profileId);
+}
+
+export async function getByProfileMonth(storeName, profileId, month) {
+  return getByIndex(storeName, "profileMonth", [profileId, month]);
 }
 
 export async function putRecord(storeName, record) {
@@ -176,22 +225,34 @@ export async function clearDatabase() {
   await transactionDone(transaction);
 }
 
-export async function seedDefaults() {
-  const [categories, methods] = await Promise.all([getAll("categories"), getAll("paymentMethods")]);
+export async function seedDefaults(profileId = DEFAULT_PROFILE_ID) {
+  let profiles = await getAll("profiles");
   const timestamp = nowIso();
+  if (!profiles.length) {
+    await putRecord("profiles", {
+      id: DEFAULT_PROFILE_ID, name: "Pessoal", icon: "👤", color: "#0f766e"
+    });
+    profiles = await getAll("profiles");
+  }
+  const targetProfileId = profiles.some((profile) => profile.id === profileId) ? profileId : profiles[0].id;
+  const [categories, methods] = await Promise.all([
+    getByProfile("categories", targetProfileId),
+    getByProfile("paymentMethods", targetProfileId)
+  ]);
   if (!categories.length) {
     await bulkPut("categories", DEFAULT_CATEGORIES.map(([name, icon, color]) => ({
-      id: uid(), name, icon, color, active: true, kind: "both", origin: "system",
+      id: uid(), profileId: targetProfileId, name, icon, color, active: true, kind: "both", origin: "system",
       createdAt: timestamp, updatedAt: timestamp, version: 1
     })));
   }
   if (!methods.length) {
     await bulkPut("paymentMethods", DEFAULT_PAYMENT_METHODS.map((name) => ({
-      id: uid(), name, active: true, origin: "system",
+      id: uid(), profileId: targetProfileId, name, active: true, origin: "system",
       createdAt: timestamp, updatedAt: timestamp, version: 1
     })));
   }
   await putRecord("appMetadata", { id: "database", schemaVersion: DB_VERSION, lastOpenedAt: timestamp });
+  return targetProfileId;
 }
 
 const CATEGORY_STORES = ["additionalIncomes", "recurringExpenses", "monthlyExpenseInstances", "oneTimeExpenses"];
@@ -223,7 +284,42 @@ export async function replaceCategoryAndDelete(oldCategoryId, newCategoryId) {
   await transactionDone(transaction);
 }
 
-export async function deleteDemoData() {
+export async function createProfile({ name, icon = "👤", color = "#0f766e", copyFromProfileId = "" }) {
+  const profile = await putRecord("profiles", { id: `profile-${uid()}`, name, icon, color });
+  if (copyFromProfileId) {
+    const [categories, methods] = await Promise.all([
+      getByProfile("categories", copyFromProfileId),
+      getByProfile("paymentMethods", copyFromProfileId)
+    ]);
+    await bulkPut("categories", categories.map((record) => ({
+      ...record, id: uid(), profileId: profile.id, createdAt: nowIso(), updatedAt: nowIso()
+    })));
+    await bulkPut("paymentMethods", methods.map((record) => ({
+      ...record, id: uid(), profileId: profile.id, createdAt: nowIso(), updatedAt: nowIso()
+    })));
+  } else {
+    await seedDefaults(profile.id);
+  }
+  return profile;
+}
+
+export async function deleteProfile(profileId) {
+  const database = await openDatabase();
+  const transaction = database.transaction([...PROFILE_STORES, "profiles"], "readwrite");
+  PROFILE_STORES.forEach((storeName) => {
+    const request = transaction.objectStore(storeName).index("profileId").openCursor(IDBKeyRange.only(profileId));
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return;
+      cursor.delete();
+      cursor.continue();
+    };
+  });
+  transaction.objectStore("profiles").delete(profileId);
+  await transactionDone(transaction);
+}
+
+export async function deleteDemoData(profileId) {
   const database = await openDatabase();
   const stores = ["monthlyIncomes", "additionalIncomes", "recurringExpenses", "monthlyExpenseInstances", "oneTimeExpenses"];
   const transaction = database.transaction(stores, "readwrite");
@@ -232,7 +328,7 @@ export async function deleteDemoData() {
     request.onsuccess = () => {
       const cursor = request.result;
       if (!cursor) return;
-      if (cursor.value.origin === "demo") cursor.delete();
+      if (cursor.value.origin === "demo" && (!profileId || cursor.value.profileId === profileId)) cursor.delete();
       cursor.continue();
     };
   });

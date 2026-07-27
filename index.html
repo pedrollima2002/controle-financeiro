@@ -44,6 +44,10 @@
     <div class="main-column">
       <header class="topbar">
         <button class="icon-button mobile-only" id="menu-button" type="button" aria-label="Abrir menu" aria-expanded="false">☰</button>
+        <div class="profile-control">
+          <label for="profile-picker">Perfil financeiro</label>
+          <select id="profile-picker" aria-label="Trocar perfil financeiro"></select>
+        </div>
         <div class="month-control">
           <label for="month-picker">Mês de referência</label>
           <div class="month-stepper">
@@ -84,6 +88,16 @@
           </div>
 
           <div class="metric-grid" id="dashboard-metrics" aria-label="Indicadores do mês"></div>
+          <div class="dashboard-notices" id="dashboard-notices">
+            <article class="panel notice-panel" id="backup-reminder" hidden>
+              <div><strong>Seu backup está pendente</strong><span id="backup-reminder-text"></span></div>
+              <button class="button secondary compact" data-view-link="backup" type="button">Fazer backup</button>
+            </article>
+            <article class="panel notice-panel" id="undated-expenses-panel" hidden>
+              <div><strong>Gastos fixos sem vencimento</strong><span id="undated-expenses-text"></span></div>
+              <button class="button secondary compact" data-view-link="recurring" type="button">Ver gastos</button>
+            </article>
+          </div>
 
           <div class="dashboard-grid">
             <article class="panel chart-panel">
@@ -244,6 +258,25 @@
               <p>Gráficos nativos, acompanhados de resumos em texto.</p>
             </div>
           </div>
+          <form class="filter-bar report-filters" id="report-filters">
+            <div class="field"><label for="report-period">Período</label><select id="report-period" name="period"><option value="month">Mês selecionado</option><option value="3">Últimos 3 meses</option><option value="6">Últimos 6 meses</option><option value="12">Últimos 12 meses</option><option value="all">Todo o histórico</option><option value="custom">Personalizado</option></select></div>
+            <div class="field"><label for="report-profile">Perfil</label><select id="report-profile" name="profileId"></select></div>
+            <div class="field"><label for="report-category">Categoria</label><select id="report-category" name="categoryId"></select></div>
+            <div class="field"><label for="report-payment">Pagamento</label><select id="report-payment" name="paymentMethodId"></select></div>
+            <div class="field"><label for="report-type">Tipo</label><select id="report-type" name="expenseType"><option value="">Fixos e avulsos</option><option value="fixed">Somente fixos</option><option value="oneTime">Somente avulsos</option></select></div>
+            <div class="field"><label for="report-status">Status</label><select id="report-status" name="status"><option value="">Pagos e pendentes</option><option value="paid">Pagos</option><option value="pending">Pendentes</option></select></div>
+            <div class="field search-field"><label for="report-search">Descrição</label><input id="report-search" name="search" type="search" placeholder="Pesquisar"></div>
+            <div class="field report-custom-date" hidden><label for="report-start">De</label><input id="report-start" name="startDate" type="date"></div>
+            <div class="field report-custom-date" hidden><label for="report-end">Até</label><input id="report-end" name="endDate" type="date"></div>
+            <button class="button ghost filter-reset" id="clear-report-filters" type="button">Limpar</button>
+          </form>
+          <div class="report-tools">
+            <div class="field preset-field"><label for="report-preset">Filtro salvo</label><select id="report-preset"><option value="">Nenhum</option></select></div>
+            <button class="button secondary compact" id="save-report-preset" type="button">Salvar filtro</button>
+            <button class="button ghost compact" id="delete-report-preset" type="button">Excluir filtro</button>
+            <button class="button secondary compact" id="export-report-csv" type="button">Exportar resultado em CSV</button>
+          </div>
+          <div class="compact-metrics report-metrics" id="report-metrics"></div>
           <div class="report-grid">
             <article class="panel chart-panel">
               <h2>Despesas por categoria</h2>
@@ -265,10 +298,31 @@
               <canvas id="balance-history-chart" height="300" role="img" aria-label="Gráfico da evolução do saldo"></canvas>
               <div class="chart-summary" id="balance-history-summary"></div>
             </article>
+            <article class="panel chart-panel">
+              <h2>Pagas versus pendentes</h2>
+              <canvas id="payment-status-chart" height="300" role="img" aria-label="Gráfico de despesas pagas e pendentes"></canvas>
+              <div class="chart-summary" id="payment-status-summary"></div>
+            </article>
+            <article class="panel chart-panel">
+              <h2>Evolução das despesas</h2>
+              <canvas id="expense-history-chart" height="300" role="img" aria-label="Gráfico da evolução das despesas filtradas"></canvas>
+              <div class="chart-summary" id="expense-history-summary"></div>
+            </article>
           </div>
           <article class="panel">
-            <div class="panel-heading"><h2>Maiores despesas do mês</h2></div>
+            <div class="panel-heading"><h2>Maiores despesas filtradas</h2></div>
             <ol class="ranking-list" id="largest-expenses"></ol>
+          </article>
+          <article class="panel table-panel">
+            <div class="panel-heading"><h2>Todos os gastos encontrados</h2></div>
+            <div class="table-wrap">
+              <table>
+                <caption class="sr-only">Detalhamento dos gastos filtrados no relatório</caption>
+                <thead><tr><th>Perfil</th><th>Data</th><th>Descrição</th><th>Categoria</th><th>Pagamento</th><th>Tipo</th><th>Status</th><th class="numeric">Valor</th></tr></thead>
+                <tbody id="report-expense-body"></tbody>
+              </table>
+            </div>
+            <div class="empty-state" id="report-expense-empty" hidden></div>
           </article>
         </section>
 
@@ -285,6 +339,10 @@
               <span class="feature-icon" aria-hidden="true">↓</span>
               <h2>Exportar backup</h2>
               <p>Salve todos os registros em JSON. Se quiser, proteja o arquivo com uma senha.</p>
+              <div class="field">
+                <label for="backup-scope">Dados incluídos</label>
+                <select id="backup-scope"><option value="all">Todos os perfis</option><option value="current">Somente o perfil atual</option></select>
+              </div>
               <label class="check-row"><input id="encrypt-backup" type="checkbox"> Proteger backup com senha</label>
               <div class="field" id="backup-password-field" hidden>
                 <label for="backup-password">Senha do backup</label>
@@ -324,6 +382,14 @@
             </div>
           </div>
           <div class="settings-stack">
+            <article class="panel">
+              <div class="panel-heading">
+                <div><span class="panel-kicker">Separação completa</span><h2>Perfis financeiros</h2></div>
+                <button class="button primary" data-action="profile-form" type="button">+ Novo perfil</button>
+              </div>
+              <p>Troque de perfil sem login. Categorias, receitas e despesas ficam separadas em cada um.</p>
+              <div class="management-list profile-list" id="profile-list"></div>
+            </article>
             <article class="panel setting-row">
               <div><h2>Tema</h2><p>Escolha a aparência ou acompanhe a configuração do sistema.</p></div>
               <div class="segmented" role="group" aria-label="Tema visual">

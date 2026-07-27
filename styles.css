@@ -74,6 +74,9 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .privacy-dot { width: 8px; height: 8px; flex: 0 0 auto; margin-top: 5px; border-radius: 50%; background: #5bd1a4; box-shadow: 0 0 0 4px rgba(91,209,164,.12); }
 .main-column { min-width: 0; }
 .topbar { min-height: 76px; position: sticky; top: 0; z-index: 15; display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 12px clamp(18px, 3vw, 42px); background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(14px); border-bottom: 1px solid color-mix(in srgb, var(--line) 75%, transparent); }
+.profile-control { display: grid; gap: 3px; min-width: 160px; }
+.profile-control label { color: var(--muted); font-size: .68rem; font-weight: 750; }
+.profile-control select { min-height: 38px; max-width: 220px; padding: 7px 30px 7px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); font-weight: 750; }
 .month-control { display: flex; align-items: center; gap: 14px; }
 .month-control > label { color: var(--muted); font-size: .78rem; font-weight: 700; }
 .month-stepper { display: flex; align-items: center; gap: 4px; padding: 3px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
@@ -120,6 +123,10 @@ h2 { margin: 0; font-size: 1.05rem; letter-spacing: -.015em; }
 .status-banner.negative .status-icon { background: var(--negative-soft); color: var(--negative); }
 
 .metric-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }
+.dashboard-notices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }
+.notice-panel { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 14px 16px; border-left: 4px solid var(--warning); box-shadow: none; }
+.notice-panel strong, .notice-panel span { display: block; }
+.notice-panel span { margin-top: 2px; color: var(--muted); font-size: .74rem; }
 .metric-card { position: relative; min-height: 116px; padding: 17px 18px; border: 1px solid var(--line); border-radius: 15px; background: var(--surface); overflow: hidden; }
 .metric-card::after { content: ""; position: absolute; right: -18px; top: -20px; width: 62px; height: 62px; border-radius: 50%; background: var(--surface-subtle); }
 .metric-card span, .metric-card strong, .metric-card small { display: block; position: relative; z-index: 1; }
@@ -178,6 +185,10 @@ td.numeric, th.numeric { text-align: right; font-variant-numeric: tabular-nums; 
 .empty-state strong { display: block; color: var(--text); margin-bottom: 4px; }
 
 .filter-bar { display: grid; grid-template-columns: 1.35fr repeat(6, minmax(120px, 1fr)) auto; gap: 10px; align-items: end; margin-bottom: 18px; padding: 15px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+.report-filters { grid-template-columns: repeat(4, minmax(140px, 1fr)); }
+.report-tools { display: flex; gap: 9px; align-items: end; flex-wrap: wrap; margin: -4px 0 18px; }
+.preset-field { min-width: 210px; }
+.report-metrics { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .field { display: grid; gap: 5px; }
 .field label, fieldset legend { font-size: .72rem; font-weight: 750; color: var(--muted); }
 .field input, .field select, .field textarea, .filter-bar input, .filter-bar select { width: 100%; min-height: 42px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
@@ -192,6 +203,8 @@ td.numeric, th.numeric { text-align: right; font-variant-numeric: tabular-nums; 
 .management-item strong, .management-item span { display: block; }
 .management-item span { color: var(--muted); font-size: .7rem; }
 .color-dot { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 11px; border-left: 5px solid var(--item-color); background: var(--surface-subtle); }
+.profile-avatar { width: 36px; height: 36px; display: grid !important; place-items: center; border-radius: 50%; border: 3px solid var(--item-color); background: var(--surface-subtle); font-size: 1rem !important; }
+.profile-item.selected { border-color: var(--primary); background: var(--primary-soft); }
 .report-grid { margin-bottom: 18px; }
 .report-grid .panel { min-width: 0; }
 .ranking-list { list-style: none; padding: 0; margin: 0; counter-reset: ranking; }
@@ -255,7 +268,9 @@ td.numeric, th.numeric { text-align: right; font-variant-numeric: tabular-nums; 
   .sidebar.open { transform: translateX(0); }
   .mobile-only { display: inline-grid !important; }
   .topbar { padding-inline: 14px; }
-  .month-control > label, .local-badge { display: none; }
+  .month-control > label, .profile-control label, .local-badge { display: none; }
+  .profile-control { min-width: 130px; }
+  .profile-control select { width: 100%; max-width: 160px; }
   main { padding-top: 22px; }
   .dashboard-grid { grid-template-columns: 1fr; }
   .split-grid, .privacy-grid { grid-template-columns: 1fr; }
@@ -269,7 +284,9 @@ td.numeric, th.numeric { text-align: right; font-variant-numeric: tabular-nums; 
   .page-heading .action-row .button, .page-heading > .button { flex: 1; }
   .status-banner { align-items: flex-start; flex-direction: column; }
   .metric-grid, .compact-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dashboard-notices { grid-template-columns: 1fr; }
   .filter-bar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .report-tools .field, .report-tools .button { flex: 1 1 180px; }
   .search-field { grid-column: 1 / -1; }
   .csv-options { grid-template-columns: 1fr; }
   .setting-row { align-items: stretch; flex-direction: column; }
@@ -286,6 +303,8 @@ td.numeric, th.numeric { text-align: right; font-variant-numeric: tabular-nums; 
   .filter-bar { grid-template-columns: 1fr; }
   .search-field { grid-column: auto; }
   .topbar { gap: 6px; }
+  .profile-control { min-width: 105px; max-width: 118px; }
+  .profile-control select { font-size: .76rem; padding-inline: 7px; }
   .month-stepper .icon-button { width: 30px; }
   .month-stepper input { min-width: 115px; font-size: .86rem; }
 }
