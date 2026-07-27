@@ -1,0 +1,60 @@
+import { addRecord, getAll, getByIndex } from "./database.js";
+import { compareMonths, dateForMonthAndDay, monthFromDate, nowIso, uid } from "./utils.js";
+
+export function shouldGenerateForMonth(recurring, month) {
+  if (!recurring.active) return false;
+  const startMonth = monthFromDate(recurring.startDate);
+  const endMonth = recurring.endDate ? monthFromDate(recurring.endDate) : null;
+  return compareMonths(month, startMonth) >= 0 && (!endMonth || compareMonths(month, endMonth) <= 0);
+}
+
+export function createOccurrence(recurring, month) {
+  const date = dateForMonthAndDay(month, recurring.dueDay);
+  const timestamp = nowIso();
+  return {
+    id: uid(),
+    recurringId: recurring.id,
+    occurrenceKey: `${recurring.id}:${month}`,
+    month,
+    description: recurring.description,
+    amountCents: recurring.amountCents,
+    categoryId: recurring.categoryId,
+    paymentMethodId: recurring.paymentMethodId,
+    date,
+    dueDay: recurring.dueDay,
+    status: "pending",
+    paidDate: null,
+    notes: recurring.notes || "",
+    origin: recurring.origin || "recurring",
+    sourceSnapshotUpdatedAt: recurring.updatedAt || timestamp,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    version: 1
+  };
+}
+
+export function generateMissingOccurrences(recurringExpenses, existingInstances, month) {
+  const existingKeys = new Set(existingInstances.map((instance) => instance.occurrenceKey));
+  return recurringExpenses
+    .filter((recurring) => shouldGenerateForMonth(recurring, month))
+    .map((recurring) => createOccurrence(recurring, month))
+    .filter((instance) => !existingKeys.has(instance.occurrenceKey));
+}
+
+export async function ensureOccurrencesForMonth(month) {
+  const [recurringExpenses, existingInstances] = await Promise.all([
+    getAll("recurringExpenses"),
+    getByIndex("monthlyExpenseInstances", "month", month)
+  ]);
+  const missing = generateMissingOccurrences(recurringExpenses, existingInstances, month);
+  let created = 0;
+  for (const occurrence of missing) {
+    try {
+      await addRecord("monthlyExpenseInstances", occurrence);
+      created += 1;
+    } catch (error) {
+      if (error?.name !== "ConstraintError") throw error;
+    }
+  }
+  return created;
+}

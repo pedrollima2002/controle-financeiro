@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f766e">
+  <meta name="description" content="Controle financeiro pessoal, privado, gratuito e offline.">
+  <title>Meu Controle Financeiro</title>
+  <link rel="manifest" href="./manifest.json">
+  <link rel="icon" href="./icons/icon-192.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#conteudo">Pular para o conteúdo</a>
+
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar" aria-label="Navegação principal">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">₿</span>
+        <div>
+          <strong>Meu Controle</strong>
+          <span>Finanças pessoais</span>
+        </div>
+      </div>
+
+      <nav class="main-nav">
+        <button class="nav-item active" data-view="dashboard" type="button"><span aria-hidden="true">⌂</span> Visão geral</button>
+        <button class="nav-item" data-view="incomes" type="button"><span aria-hidden="true">↗</span> Receitas</button>
+        <button class="nav-item" data-view="recurring" type="button"><span aria-hidden="true">↻</span> Gastos fixos</button>
+        <button class="nav-item" data-view="expenses" type="button"><span aria-hidden="true">↘</span> Gastos avulsos</button>
+        <button class="nav-item" data-view="categories" type="button"><span aria-hidden="true">◈</span> Cadastros</button>
+        <button class="nav-item" data-view="reports" type="button"><span aria-hidden="true">▥</span> Relatórios</button>
+        <button class="nav-item" data-view="backup" type="button"><span aria-hidden="true">⇅</span> Backup</button>
+        <button class="nav-item" data-view="settings" type="button"><span aria-hidden="true">⚙</span> Configurações</button>
+        <button class="nav-item" data-view="privacy" type="button"><span aria-hidden="true">◇</span> Privacidade</button>
+      </nav>
+
+      <div class="sidebar-foot">
+        <span class="privacy-dot" aria-hidden="true"></span>
+        <span>Seus dados ficam neste dispositivo.</span>
+      </div>
+    </aside>
+
+    <div class="main-column">
+      <header class="topbar">
+        <button class="icon-button mobile-only" id="menu-button" type="button" aria-label="Abrir menu" aria-expanded="false">☰</button>
+        <div class="month-control">
+          <label for="month-picker">Mês de referência</label>
+          <div class="month-stepper">
+            <button class="icon-button" id="previous-month" type="button" aria-label="Mês anterior">‹</button>
+            <input id="month-picker" type="month">
+            <button class="icon-button" id="next-month" type="button" aria-label="Próximo mês">›</button>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <button class="button secondary compact" id="install-button" type="button" hidden>Instalar app</button>
+          <span class="local-badge"><span aria-hidden="true">●</span> Local e privado</span>
+        </div>
+      </header>
+
+      <main id="conteudo" tabindex="-1">
+        <section class="view active" id="view-dashboard" data-title="Visão geral">
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow" id="dashboard-month-label">Resumo mensal</p>
+              <h1>Seu mês em um olhar</h1>
+              <p>Acompanhe o que entrou, o que saiu e o que ainda está pendente.</p>
+            </div>
+            <div class="action-row">
+              <button class="button secondary" data-action="salary-form" type="button">Definir salário</button>
+              <button class="button primary" data-action="expense-form" type="button">+ Novo gasto</button>
+            </div>
+          </div>
+
+          <div class="status-banner" id="balance-banner" role="status">
+            <div>
+              <span class="status-icon" id="balance-icon" aria-hidden="true">✓</span>
+              <div>
+                <strong id="balance-status">Saldo previsto positivo</strong>
+                <span id="balance-message">Você está dentro do planejamento deste mês.</span>
+              </div>
+            </div>
+            <strong class="status-value" id="balance-value">R$ 0,00</strong>
+          </div>
+
+          <div class="metric-grid" id="dashboard-metrics" aria-label="Indicadores do mês"></div>
+
+          <div class="dashboard-grid">
+            <article class="panel chart-panel">
+              <div class="panel-heading">
+                <div>
+                  <span class="panel-kicker">Distribuição</span>
+                  <h2>Gastos por categoria</h2>
+                </div>
+                <button class="text-button" data-view-link="reports" type="button">Ver relatório</button>
+              </div>
+              <canvas id="dashboard-chart" height="260" role="img" aria-label="Gráfico de gastos por categoria"></canvas>
+              <div class="chart-summary" id="dashboard-chart-summary"></div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-heading">
+                <div>
+                  <span class="panel-kicker">Movimentações</span>
+                  <h2>Últimos lançamentos</h2>
+                </div>
+                <button class="text-button" data-view-link="expenses" type="button">Ver todos</button>
+              </div>
+              <div class="transaction-list" id="recent-transactions"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" id="view-incomes" data-title="Receitas" hidden>
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow">Entradas do mês</p>
+              <h1>Receitas</h1>
+              <p>Registre o salário e acompanhe outras entradas previstas ou recebidas.</p>
+            </div>
+            <div class="action-row">
+              <button class="button secondary" data-action="salary-form" type="button">Definir salário</button>
+              <button class="button primary" data-action="income-form" type="button">+ Nova receita</button>
+            </div>
+          </div>
+          <div class="compact-metrics" id="income-metrics"></div>
+          <article class="panel">
+            <div class="panel-heading">
+              <h2>Salário líquido</h2>
+              <button class="text-button" id="copy-salary-button" type="button">Copiar do mês anterior</button>
+            </div>
+            <div id="salary-card"></div>
+          </article>
+          <article class="panel table-panel">
+            <div class="panel-heading"><h2>Outras receitas</h2></div>
+            <div class="table-wrap">
+              <table>
+                <caption class="sr-only">Outras receitas do mês selecionado</caption>
+                <thead><tr><th>Data</th><th>Descrição</th><th>Categoria</th><th>Status</th><th class="numeric">Valor</th><th><span class="sr-only">Ações</span></th></tr></thead>
+                <tbody id="income-table-body"></tbody>
+              </table>
+            </div>
+            <div class="empty-state" id="income-empty" hidden></div>
+          </article>
+        </section>
+
+        <section class="view" id="view-recurring" data-title="Gastos fixos" hidden>
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow">Planejamento recorrente</p>
+              <h1>Gastos fixos</h1>
+              <p>Gerencie recorrências e os pagamentos de cada mês sem alterar o histórico.</p>
+            </div>
+            <button class="button primary" data-action="recurring-form" type="button">+ Novo gasto fixo</button>
+          </div>
+          <div class="compact-metrics" id="recurring-metrics"></div>
+          <article class="panel table-panel">
+            <div class="panel-heading">
+              <div><span class="panel-kicker">Mês selecionado</span><h2>Ocorrências mensais</h2></div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <caption class="sr-only">Ocorrências de gastos fixos no mês</caption>
+                <thead><tr><th>Vencimento</th><th>Descrição</th><th>Categoria</th><th>Status</th><th class="numeric">Valor</th><th><span class="sr-only">Ações</span></th></tr></thead>
+                <tbody id="instance-table-body"></tbody>
+              </table>
+            </div>
+            <div class="empty-state" id="instance-empty" hidden></div>
+          </article>
+          <article class="panel table-panel">
+            <div class="panel-heading"><div><span class="panel-kicker">Próximos meses</span><h2>Recorrências cadastradas</h2></div></div>
+            <div class="table-wrap">
+              <table>
+                <caption class="sr-only">Regras de gastos recorrentes</caption>
+                <thead><tr><th>Descrição</th><th>Vencimento</th><th>Categoria</th><th>Situação</th><th class="numeric">Valor</th><th><span class="sr-only">Ações</span></th></tr></thead>
+                <tbody id="recurring-table-body"></tbody>
+              </table>
+            </div>
+            <div class="empty-state" id="recurring-empty" hidden></div>
+          </article>
+        </section>
+
+        <section class="view" id="view-expenses" data-title="Gastos avulsos" hidden>
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow">Dia a dia</p>
+              <h1>Gastos avulsos</h1>
+              <p>Pesquise, filtre e organize as despesas que não se repetem todo mês.</p>
+            </div>
+            <button class="button primary" data-action="expense-form" type="button">+ Novo gasto</button>
+          </div>
+          <form class="filter-bar" id="expense-filters">
+            <div class="field search-field"><label for="expense-search">Pesquisar</label><input id="expense-search" name="search" type="search" placeholder="Descrição"></div>
+            <div class="field"><label for="expense-category-filter">Categoria</label><select id="expense-category-filter" name="categoryId"></select></div>
+            <div class="field"><label for="expense-payment-filter">Pagamento</label><select id="expense-payment-filter" name="paymentMethodId"></select></div>
+            <div class="field"><label for="expense-status-filter">Status</label><select id="expense-status-filter" name="status"><option value="">Todos</option><option value="paid">Pago</option><option value="pending">Pendente</option></select></div>
+            <div class="field"><label for="expense-start-filter">De</label><input id="expense-start-filter" name="startDate" type="date"></div>
+            <div class="field"><label for="expense-end-filter">Até</label><input id="expense-end-filter" name="endDate" type="date"></div>
+            <div class="field"><label for="expense-sort">Ordenar</label><select id="expense-sort" name="sort"><option value="date-desc">Data: recente</option><option value="date-asc">Data: antiga</option><option value="value-desc">Maior valor</option><option value="value-asc">Menor valor</option></select></div>
+            <button class="button ghost filter-reset" id="clear-expense-filters" type="button">Limpar</button>
+          </form>
+          <div class="compact-metrics" id="expense-metrics"></div>
+          <article class="panel table-panel">
+            <div class="table-wrap">
+              <table>
+                <caption class="sr-only">Gastos avulsos filtrados</caption>
+                <thead><tr><th>Data</th><th>Descrição</th><th>Categoria</th><th>Pagamento</th><th>Status</th><th class="numeric">Valor</th><th><span class="sr-only">Ações</span></th></tr></thead>
+                <tbody id="expense-table-body"></tbody>
+              </table>
+            </div>
+            <div class="empty-state" id="expense-empty" hidden></div>
+          </article>
+        </section>
+
+        <section class="view" id="view-categories" data-title="Cadastros" hidden>
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow">Personalização</p>
+              <h1>Categorias e pagamentos</h1>
+              <p>Adapte os cadastros à sua rotina sem perder vínculos históricos.</p>
+            </div>
+            <div class="action-row">
+              <button class="button secondary" data-action="payment-form" type="button">+ Pagamento</button>
+              <button class="button primary" data-action="category-form" type="button">+ Categoria</button>
+            </div>
+          </div>
+          <div class="split-grid">
+            <article class="panel">
+              <div class="panel-heading"><h2>Categorias</h2></div>
+              <div class="management-list" id="category-list"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-heading"><h2>Formas de pagamento</h2></div>
+              <div class="management-list" id="payment-list"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" id="view-reports" data-title="Relatórios" hidden>
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow">Análise</p>
+              <h1>Relatórios</h1>
+              <p>Gráficos nativos, acompanhados de resumos em texto.</p>
+            </div>
+          </div>
+          <div class="report-grid">
+            <article class="panel chart-panel">
+              <h2>Despesas por categoria</h2>
+              <canvas id="category-report-chart" height="300" role="img" aria-label="Gráfico de despesas por categoria"></canvas>
+              <div class="chart-summary" id="category-report-summary"></div>
+            </article>
+            <article class="panel chart-panel">
+              <h2>Fixas versus avulsas</h2>
+              <canvas id="expense-type-chart" height="300" role="img" aria-label="Gráfico de despesas fixas e avulsas"></canvas>
+              <div class="chart-summary" id="expense-type-summary"></div>
+            </article>
+            <article class="panel chart-panel">
+              <h2>Receitas versus despesas</h2>
+              <canvas id="income-expense-chart" height="300" role="img" aria-label="Gráfico de receitas e despesas"></canvas>
+              <div class="chart-summary" id="income-expense-summary"></div>
+            </article>
+            <article class="panel chart-panel">
+              <h2>Evolução do saldo</h2>
+              <canvas id="balance-history-chart" height="300" role="img" aria-label="Gráfico da evolução do saldo"></canvas>
+              <div class="chart-summary" id="balance-history-summary"></div>
+            </article>
+          </div>
+          <article class="panel">
+            <div class="panel-heading"><h2>Maiores despesas do mês</h2></div>
+            <ol class="ranking-list" id="largest-expenses"></ol>
+          </article>
+        </section>
+
+        <section class="view" id="view-backup" data-title="Backup" hidden>
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow">Portabilidade</p>
+              <h1>Backup e restauração</h1>
+              <p>Leve uma cópia dos seus dados com você. O arquivo nunca é enviado pela aplicação.</p>
+            </div>
+          </div>
+          <div class="split-grid">
+            <article class="panel">
+              <span class="feature-icon" aria-hidden="true">↓</span>
+              <h2>Exportar backup</h2>
+              <p>Salve todos os registros em JSON. Se quiser, proteja o arquivo com uma senha.</p>
+              <label class="check-row"><input id="encrypt-backup" type="checkbox"> Proteger backup com senha</label>
+              <div class="field" id="backup-password-field" hidden>
+                <label for="backup-password">Senha do backup</label>
+                <input id="backup-password" type="password" autocomplete="new-password" minlength="8">
+                <small>A senha não será armazenada e não poderá ser recuperada.</small>
+              </div>
+              <button class="button primary full" id="export-json-button" type="button">Exportar backup completo</button>
+            </article>
+            <article class="panel">
+              <span class="feature-icon" aria-hidden="true">↑</span>
+              <h2>Restaurar backup</h2>
+              <p>Selecione um backup JSON válido para revisar o conteúdo antes de importar.</p>
+              <div class="field">
+                <label for="import-file">Arquivo de backup</label>
+                <input id="import-file" type="file" accept=".json,application/json">
+              </div>
+              <button class="button secondary full" id="review-import-button" type="button">Revisar arquivo</button>
+            </article>
+          </div>
+          <article class="panel">
+            <div class="panel-heading"><div><span class="panel-kicker">Planilhas</span><h2>Exportar CSV</h2></div></div>
+            <p>O arquivo usa ponto e vírgula e codificação compatível com planilhas no padrão brasileiro.</p>
+            <div class="csv-options">
+              <div class="field"><label for="csv-scope">Período</label><select id="csv-scope"><option value="all">Todos os meses</option><option value="month">Somente o mês selecionado</option></select></div>
+              <div class="field"><label for="csv-type">Lançamentos</label><select id="csv-type"><option value="all">Receitas e despesas</option><option value="expenses">Somente despesas</option><option value="incomes">Somente receitas</option></select></div>
+              <button class="button secondary" id="export-csv-button" type="button">Exportar CSV</button>
+            </div>
+          </article>
+        </section>
+
+        <section class="view" id="view-settings" data-title="Configurações" hidden>
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow">Preferências</p>
+              <h1>Configurações</h1>
+              <p>Personalize a aparência e cuide do armazenamento local.</p>
+            </div>
+          </div>
+          <div class="settings-stack">
+            <article class="panel setting-row">
+              <div><h2>Tema</h2><p>Escolha a aparência ou acompanhe a configuração do sistema.</p></div>
+              <div class="segmented" role="group" aria-label="Tema visual">
+                <button type="button" data-theme-value="light">Claro</button>
+                <button type="button" data-theme-value="dark">Escuro</button>
+                <button type="button" data-theme-value="system">Sistema</button>
+              </div>
+            </article>
+            <article class="panel setting-row">
+              <div><h2>Armazenamento persistente</h2><p id="storage-status">O navegador pode remover dados locais em situações de pouco espaço.</p></div>
+              <button class="button secondary" id="persist-storage-button" type="button">Solicitar proteção</button>
+            </article>
+            <article class="panel setting-row">
+              <div><h2>Dados de demonstração</h2><p>Carregue exemplos identificados, sem substituir seus dados atuais.</p></div>
+              <div class="action-row">
+                <button class="button secondary" id="load-demo-button" type="button">Carregar demonstração</button>
+                <button class="button ghost" id="remove-demo-button" type="button">Apagar demonstração</button>
+              </div>
+            </article>
+            <article class="panel danger-zone">
+              <div>
+                <span class="panel-kicker">Zona de perigo</span>
+                <h2>Apagar todos os dados locais</h2>
+                <p>Essa ação é definitiva. Exporte um backup antes de continuar.</p>
+              </div>
+              <button class="button danger" id="delete-all-button" type="button">Apagar todos os dados</button>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" id="view-privacy" data-title="Privacidade e dados" hidden>
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow">Transparência</p>
+              <h1>Privacidade e dados</h1>
+              <p>Este aplicativo foi desenhado para funcionar sem contas, rastreamento ou servidores.</p>
+            </div>
+          </div>
+          <article class="privacy-hero panel">
+            <span class="privacy-shield" aria-hidden="true">✓</span>
+            <div><h2>Seus dados financeiros ficam no seu navegador</h2><p>Nenhum lançamento é enviado ao GitHub ou a qualquer banco de dados remoto.</p></div>
+          </article>
+          <div class="privacy-grid">
+            <article class="panel"><h2>O que não fazemos</h2><ul class="check-list"><li>Sem analytics, pixels ou telemetria</li><li>Sem anúncios ou cookies de rastreamento</li><li>Sem integração bancária</li><li>Sem armazenamento de senhas ou dados completos de cartão</li></ul></article>
+            <article class="panel"><h2>O que você precisa saber</h2><ul class="notice-list"><li>Limpar os dados do navegador pode apagar seus registros.</li><li>Outro navegador ou dispositivo não recebe os dados automaticamente.</li><li>O navegador decide se concede armazenamento persistente.</li><li>Faça backups regulares e guarde-os em local seguro.</li></ul></article>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <dialog id="editor-dialog" class="modal">
+    <form method="dialog" id="editor-form">
+      <div class="modal-heading">
+        <div><span class="panel-kicker" id="editor-kicker">Cadastro</span><h2 id="editor-title">Novo lançamento</h2></div>
+        <button class="icon-button" value="cancel" type="submit" aria-label="Fechar">×</button>
+      </div>
+      <div class="form-grid" id="editor-fields"></div>
+      <p class="form-error" id="editor-error" role="alert" hidden></p>
+      <div class="modal-actions">
+        <button class="button ghost" value="cancel" type="submit">Cancelar</button>
+        <button class="button primary" id="editor-submit" value="default" type="submit">Salvar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="confirm-dialog" class="modal small-modal">
+    <form method="dialog" id="confirm-form">
+      <div class="modal-heading"><h2 id="confirm-title">Confirmar ação</h2></div>
+      <p id="confirm-message"></p>
+      <div id="confirm-extra"></div>
+      <div class="modal-actions">
+        <button class="button ghost" value="cancel" type="submit">Cancelar</button>
+        <button class="button danger" id="confirm-submit" value="confirm" type="submit">Confirmar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="import-dialog" class="modal">
+    <form method="dialog" id="import-form">
+      <div class="modal-heading"><div><span class="panel-kicker">Restauração</span><h2>Revisar backup</h2></div></div>
+      <div id="import-summary"></div>
+      <div class="field" id="import-password-field" hidden><label for="import-password">Senha do backup</label><input id="import-password" type="password" autocomplete="current-password"></div>
+      <fieldset class="radio-group" id="import-mode-field">
+        <legend>Como importar?</legend>
+        <label><input type="radio" name="import-mode" value="merge" checked> Mesclar, preservando registros com identificadores já existentes</label>
+        <label><input type="radio" name="import-mode" value="replace"> Substituir todos os dados atuais</label>
+      </fieldset>
+      <p class="form-error" id="import-error" role="alert" hidden></p>
+      <div class="modal-actions">
+        <button class="button ghost" value="cancel" type="submit">Cancelar</button>
+        <button class="button primary" id="import-submit" value="confirm" type="submit">Importar dados</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+  <div class="update-banner" id="update-banner" hidden>
+    <span>Uma nova versão está disponível.</span>
+    <button class="button compact primary" id="update-button" type="button">Atualizar agora</button>
+  </div>
+  <div class="offline-indicator" id="offline-indicator" hidden>Modo offline</div>
+  <div class="scrim" id="scrim" hidden></div>
+
+  <script type="module" src="./js/app.js"></script>
+</body>
+</html>
