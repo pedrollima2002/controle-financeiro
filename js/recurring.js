@@ -26,6 +26,7 @@ export function createOccurrence(recurring, month) {
     dueDay,
     status: "pending",
     paidDate: null,
+    fundingAllocations: occurrenceFundingAllocations(recurring, month),
     notes: recurring.notes || "",
     origin: recurring.origin || "recurring",
     sourceSnapshotUpdatedAt: recurring.updatedAt || timestamp,
@@ -33,6 +34,17 @@ export function createOccurrence(recurring, month) {
     updatedAt: timestamp,
     version: 1
   };
+}
+
+export function occurrenceFundingAllocations(recurring, month) {
+  const template = Array.isArray(recurring.fundingTemplate) ? recurring.fundingTemplate : [];
+  if (template.length === 1 && template[0].sourceType === "salary") {
+    return [{ ...template[0], amountCents: recurring.amountCents, sourceMonth: month }];
+  }
+  if (template.length && template.every((allocation) => allocation.sourceMonth === month)) {
+    return template.map((allocation) => ({ ...allocation }));
+  }
+  return [];
 }
 
 export function generateMissingOccurrences(recurringExpenses, existingInstances, month) {

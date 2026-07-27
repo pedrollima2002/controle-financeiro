@@ -175,7 +175,7 @@
             <div class="table-wrap">
               <table>
                 <caption class="sr-only">Ocorrências de gastos fixos no mês</caption>
-                <thead><tr><th>Vencimento</th><th>Descrição</th><th>Categoria</th><th>Status</th><th class="numeric">Valor</th><th><span class="sr-only">Ações</span></th></tr></thead>
+                <thead><tr><th>Vencimento</th><th>Descrição</th><th>Categoria</th><th>Origem da renda</th><th>Status</th><th class="numeric">Valor</th><th><span class="sr-only">Ações</span></th></tr></thead>
                 <tbody id="instance-table-body"></tbody>
               </table>
             </div>
@@ -186,7 +186,7 @@
             <div class="table-wrap">
               <table>
                 <caption class="sr-only">Regras de gastos recorrentes</caption>
-                <thead><tr><th>Descrição</th><th>Vencimento</th><th>Categoria</th><th>Situação</th><th class="numeric">Valor</th><th><span class="sr-only">Ações</span></th></tr></thead>
+                <thead><tr><th>Descrição</th><th>Vencimento</th><th>Categoria</th><th>Origem futura</th><th>Situação</th><th class="numeric">Valor</th><th><span class="sr-only">Ações</span></th></tr></thead>
                 <tbody id="recurring-table-body"></tbody>
               </table>
             </div>
@@ -218,7 +218,7 @@
             <div class="table-wrap">
               <table>
                 <caption class="sr-only">Gastos avulsos filtrados</caption>
-                <thead><tr><th>Data</th><th>Descrição</th><th>Categoria</th><th>Pagamento</th><th>Status</th><th class="numeric">Valor</th><th><span class="sr-only">Ações</span></th></tr></thead>
+                <thead><tr><th>Data</th><th>Descrição</th><th>Categoria</th><th>Pagamento</th><th>Origem da renda</th><th>Status</th><th class="numeric">Valor</th><th><span class="sr-only">Ações</span></th></tr></thead>
                 <tbody id="expense-table-body"></tbody>
               </table>
             </div>
@@ -265,6 +265,8 @@
             <div class="field"><label for="report-payment">Pagamento</label><select id="report-payment" name="paymentMethodId"></select></div>
             <div class="field"><label for="report-type">Tipo</label><select id="report-type" name="expenseType"><option value="">Fixos e avulsos</option><option value="fixed">Somente fixos</option><option value="oneTime">Somente avulsos</option></select></div>
             <div class="field"><label for="report-status">Status</label><select id="report-status" name="status"><option value="">Pagos e pendentes</option><option value="paid">Pagos</option><option value="pending">Pendentes</option></select></div>
+            <div class="field"><label for="report-funding-type">Uso da renda</label><select id="report-funding-type" name="fundingType"><option value="">Todas as origens</option><option value="salary">Usou salário</option><option value="additional">Usou receita adicional</option><option value="mixed">Dividido entre rendas</option><option value="funded">Com origem definida</option><option value="unassigned">Sem origem definida</option></select></div>
+            <div class="field"><label for="report-funding-source">Renda específica</label><select id="report-funding-source" name="fundingSource"></select></div>
             <div class="field search-field"><label for="report-search">Descrição</label><input id="report-search" name="search" type="search" placeholder="Pesquisar"></div>
             <div class="field report-custom-date" hidden><label for="report-start">De</label><input id="report-start" name="startDate" type="date"></div>
             <div class="field report-custom-date" hidden><label for="report-end">Até</label><input id="report-end" name="endDate" type="date"></div>
@@ -277,6 +279,12 @@
             <button class="button secondary compact" id="export-report-csv" type="button">Exportar resultado em CSV</button>
           </div>
           <div class="compact-metrics report-metrics" id="report-metrics"></div>
+          <article class="panel funding-overview">
+            <div class="panel-heading">
+              <div><span class="panel-kicker">Origem do dinheiro</span><h2>Como as rendas foram utilizadas</h2></div>
+            </div>
+            <div class="funding-summary-grid" id="funding-summary-grid"></div>
+          </article>
           <div class="report-grid">
             <article class="panel chart-panel">
               <h2>Despesas por categoria</h2>
@@ -308,7 +316,28 @@
               <canvas id="expense-history-chart" height="300" role="img" aria-label="Gráfico da evolução das despesas filtradas"></canvas>
               <div class="chart-summary" id="expense-history-summary"></div>
             </article>
+            <article class="panel chart-panel">
+              <h2>Gastos por origem da renda</h2>
+              <canvas id="funding-source-chart" height="300" role="img" aria-label="Gráfico dos gastos por origem da renda"></canvas>
+              <div class="chart-summary" id="funding-source-summary"></div>
+            </article>
+            <article class="panel chart-panel">
+              <h2>Renda disponível após os gastos</h2>
+              <canvas id="funding-balance-chart" height="300" role="img" aria-label="Gráfico da renda utilizada e disponível"></canvas>
+              <div class="chart-summary" id="funding-balance-summary"></div>
+            </article>
           </div>
+          <article class="panel table-panel">
+            <div class="panel-heading"><h2>Saldo detalhado de cada renda</h2></div>
+            <div class="table-wrap">
+              <table>
+                <caption class="sr-only">Saldo e utilização de cada renda no relatório</caption>
+                <thead><tr><th>Perfil</th><th>Mês</th><th>Renda</th><th class="numeric">Valor</th><th class="numeric">Utilizado</th><th class="numeric">Disponível</th><th>Uso</th></tr></thead>
+                <tbody id="funding-source-body"></tbody>
+              </table>
+            </div>
+            <div class="empty-state" id="funding-source-empty" hidden></div>
+          </article>
           <article class="panel">
             <div class="panel-heading"><h2>Maiores despesas filtradas</h2></div>
             <ol class="ranking-list" id="largest-expenses"></ol>
@@ -318,7 +347,7 @@
             <div class="table-wrap">
               <table>
                 <caption class="sr-only">Detalhamento dos gastos filtrados no relatório</caption>
-                <thead><tr><th>Perfil</th><th>Data</th><th>Descrição</th><th>Categoria</th><th>Pagamento</th><th>Tipo</th><th>Status</th><th class="numeric">Valor</th></tr></thead>
+                <thead><tr><th>Perfil</th><th>Data</th><th>Descrição</th><th>Categoria</th><th>Pagamento</th><th>Origem da renda</th><th>Tipo</th><th>Status</th><th class="numeric">Valor</th></tr></thead>
                 <tbody id="report-expense-body"></tbody>
               </table>
             </div>

@@ -1,11 +1,11 @@
 import {
-  calculateMonth, filterExpenseRecords, filterMonthlyRecords, groupByCategory, summarizeExpenses
+  calculateMonth, filterExpenseRecords, filterMonthlyRecords, groupByCategory, summarizeExpenses, summarizeFunding
 } from "../js/calculations.js";
 import {
   formatCurrency, parseMoneyToCents
 } from "../js/utils.js";
 import {
-  createOccurrence, generateMissingOccurrences, shouldGenerateForMonth
+  createOccurrence, generateMissingOccurrences, occurrenceFundingAllocations, shouldGenerateForMonth
 } from "../js/recurring.js";
 import {
   mergeRecordsById, normalizeBackup, validateBackup
@@ -123,11 +123,32 @@ test("não duplica recorrências já existentes", () => {
   equal(generated.length, 0);
 });
 
+test("repete desconto do salário nas próximas ocorrências", () => {
+  const recurring = {
+    amountCents: 25000,
+    fundingTemplate: [{ id: "a1", sourceType: "salary", sourceMonth: "2026-07", amountCents: 20000 }]
+  };
+  const allocations = occurrenceFundingAllocations(recurring, "2026-08");
+  equal(allocations.length, 1);
+  equal(allocations[0].sourceType, "salary");
+  equal(allocations[0].amountCents, 25000);
+  equal(allocations[0].sourceMonth, "2026-08");
+});
+
+test("não leva receita adicional específica para outro mês", () => {
+  const recurring = {
+    amountCents: 25000,
+    fundingTemplate: [{ id: "a1", sourceType: "income", sourceId: "i1", sourceMonth: "2026-07", amountCents: 25000 }]
+  };
+  equal(occurrenceFundingAllocations(recurring, "2026-07").length, 1);
+  equal(occurrenceFundingAllocations(recurring, "2026-08").length, 0);
+});
+
 test("valida a estrutura completa de backup", () => {
   const data = Object.fromEntries(STORES.map((store) => [store, []]));
-  const result = validateBackup({ format: "controle-financeiro", formatVersion: 2, data });
+  const result = validateBackup({ format: "controle-financeiro", formatVersion: 3, data });
   equal(result.valid, true);
-  equal(validateBackup({ format: "inválido", formatVersion: 2, data }).valid, false);
+  equal(validateBackup({ format: "inválido", formatVersion: 3, data }).valid, false);
 });
 
 test("migra backup antigo para o perfil Pessoal", () => {
@@ -137,9 +158,20 @@ test("migra backup antigo para o perfil Pessoal", () => {
   const oldBackup = { format: "controle-financeiro", formatVersion: 1, exportedAt: "2026-01-01T00:00:00.000Z", data };
   equal(validateBackup(oldBackup).valid, true);
   const migrated = normalizeBackup(oldBackup);
-  equal(migrated.formatVersion, 2);
+  equal(migrated.formatVersion, 3);
   equal(migrated.data.profiles[0].name, "Pessoal");
   equal(migrated.data.oneTimeExpenses[0].profileId, "profile-default");
+  deepEqual(migrated.data.oneTimeExpenses[0].fundingAllocations, []);
+});
+
+test("migra backup da versão de perfis sem alterar os perfis", () => {
+  const data = Object.fromEntries(STORES.map((store) => [store, []]));
+  data.profiles = [{ id: "p1", name: "Casa" }];
+  data.monthlyExpenseInstances = [{ id: "f1", profileId: "p1", amountCents: 1000 }];
+  const migrated = normalizeBackup({ format: "controle-financeiro", formatVersion: 2, data });
+  equal(migrated.formatVersion, 3);
+  equal(migrated.data.profiles[0].name, "Casa");
+  deepEqual(migrated.data.monthlyExpenseInstances[0].fundingAllocations, []);
 });
 
 test("mescla registros por identificador sem duplicar", () => {
@@ -177,26 +209,61 @@ test("resume o total filtrado, pago, pendente e média", () => {
   deepEqual(summary, { count: 2, total: 40000, paid: 10000, pending: 30000, average: 20000 });
 });
 
-async function run() {
-  const results = document.querySelector("#results");
-  let passed = 0;
+test("filtra gastos pela origem da renda", () => {
+  const records = [
+    { id: "s", description: "Salário", fundingAllocations: [{ sourceType: "salary", amountCents: 1000 }] },
+    { id: "i", description: "Extra", fundingAllocations: [{ sourceType: "income", sourceId: "r1", amountCents: 2000 }] },
+    { id: "m", description: "Dividido", fundingAllocations: [{ sourceType: "salary", amountCents: 1000 }, { sourceType: "income", sourceId: "r1", amountCents: 1000 }] },
+    { id: "u", description: "Antigo", fundingAllocations: [] }
+  ];
+  deepEqual(filterExpenseRecords(records, { fundingType: "salary" }).map((item) => item.id), ["s", "m"]);
+  deepEqual(filterExpenseRecords(records, { fundingType: "additional" }).map((item) => item.id), ["i", "m"]);
+  deepEqual(filterExpenseRecords(records, { fundingType: "mixed" }).map((item) => item.id), ["m"]);
+  deepEqual(filterExpenseRecords(records, { fundingType: "unassigned" }).map((item) => item.id), ["u"]);
+  deepEqual(filterExpenseRecords(records, { fundingSource: "income:r1" }).map((item) => item.id), ["i", "m"]);
+});
+
+test("resume salário, receitas adicionais e gastos sem origem", () => {
+  const summary = summarizeFunding([
+    { amountCents: 4000, fundingAllocations: [{ sourceType: "salary", amountCents: 3000 }, { sourceType: "income", sourceId: "r1", amountCents: 1000 }] },
+    { amountCents: 2000, fundingAllocations: [{ sourceType: "income", sourceId: "r1", amountCents: 2000 }] },
+    { amountCents: 500, fundingAllocations: [] }
+  ]);
+  deepEqual(summary, { salary: 3000, additional: 3000, allocated: 6000, unassigned: 500, mixedExpenses: 4000 });
+});
+
+export async function executeTests() {
+  const outcomes = [];
   for (const item of tests) {
-    const row = document.createElement("li");
     try {
       await item.callback();
-      row.className = "pass";
-      row.textContent = `PASSOU — ${item.name}`;
-      passed += 1;
+      outcomes.push({ name: item.name, passed: true });
     } catch (error) {
-      row.className = "fail";
-      row.textContent = `FALHOU — ${item.name}: ${error.message}`;
+      outcomes.push({ name: item.name, passed: false, error: error.message });
     }
-    results.append(row);
   }
-  const summary = document.querySelector("#summary");
-  summary.textContent = `${passed} de ${tests.length} testes passaram.`;
-  summary.dataset.passed = String(passed);
-  summary.dataset.total = String(tests.length);
+  return outcomes;
 }
 
-run();
+async function run() {
+  const results = document.querySelector("#results");
+  const outcomes = await executeTests();
+  outcomes.forEach((item) => {
+    const row = document.createElement("li");
+    if (item.passed) {
+      row.className = "pass";
+      row.textContent = `PASSOU — ${item.name}`;
+    } else {
+      row.className = "fail";
+      row.textContent = `FALHOU — ${item.name}: ${item.error}`;
+    }
+    results.append(row);
+  });
+  const passed = outcomes.filter((item) => item.passed).length;
+  const summary = document.querySelector("#summary");
+  summary.textContent = `${passed} de ${outcomes.length} testes passaram.`;
+  summary.dataset.passed = String(passed);
+  summary.dataset.total = String(outcomes.length);
+}
+
+if (typeof document !== "undefined") run();

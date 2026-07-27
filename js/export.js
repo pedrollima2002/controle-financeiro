@@ -84,7 +84,7 @@ export function validateBackup(backup) {
   const errors = [];
   if (!backup || typeof backup !== "object") errors.push("O conteúdo não é um objeto JSON.");
   if (backup?.format !== "controle-financeiro") errors.push("O arquivo não pertence a este aplicativo.");
-  if (![1, BACKUP_VERSION].includes(backup?.formatVersion)) errors.push(`A versão ${backup?.formatVersion ?? "desconhecida"} não é compatível com a versão ${BACKUP_VERSION}.`);
+  if (![1, 2, BACKUP_VERSION].includes(backup?.formatVersion)) errors.push(`A versão ${backup?.formatVersion ?? "desconhecida"} não é compatível com a versão ${BACKUP_VERSION}.`);
   if (!backup?.data || typeof backup.data !== "object") errors.push("A seção de dados está ausente.");
   for (const store of STORES) {
     if (store === "profiles" && backup?.formatVersion === 1) continue;
@@ -101,14 +101,25 @@ export function normalizeBackup(backup) {
   if (backup.formatVersion === BACKUP_VERSION) return backup;
   const timestamp = backup.exportedAt || nowIso();
   const data = Object.fromEntries(STORES.map((store) => [store, [...(backup.data[store] || [])]]));
-  data.profiles = [{
-    id: DEFAULT_PROFILE_ID, name: "Pessoal", icon: "👤", color: "#0f766e",
-    createdAt: timestamp, updatedAt: timestamp, version: 1
-  }];
+  if (backup.formatVersion === 1) {
+    data.profiles = [{
+      id: DEFAULT_PROFILE_ID, name: "Pessoal", icon: "👤", color: "#0f766e",
+      createdAt: timestamp, updatedAt: timestamp, version: 1
+    }];
+  }
   PROFILE_STORES.forEach((store) => {
     data[store] = data[store].map((record) => ({ ...record, profileId: record.profileId || DEFAULT_PROFILE_ID }));
   });
-  return { ...backup, formatVersion: BACKUP_VERSION, migratedFromVersion: 1, data };
+  data.oneTimeExpenses = data.oneTimeExpenses.map((record) => ({
+    ...record, fundingAllocations: Array.isArray(record.fundingAllocations) ? record.fundingAllocations : []
+  }));
+  data.monthlyExpenseInstances = data.monthlyExpenseInstances.map((record) => ({
+    ...record, fundingAllocations: Array.isArray(record.fundingAllocations) ? record.fundingAllocations : []
+  }));
+  data.recurringExpenses = data.recurringExpenses.map((record) => ({
+    ...record, fundingTemplate: Array.isArray(record.fundingTemplate) ? record.fundingTemplate : []
+  }));
+  return { ...backup, formatVersion: BACKUP_VERSION, migratedFromVersion: backup.formatVersion, data };
 }
 
 export function backupSummary(backup) {
@@ -149,7 +160,18 @@ function csvEscape(value) {
   return `"${text}"`;
 }
 
-function rowFor(record, type, categoryNames, paymentNames, profileNames) {
+function fundingText(record, incomeNames) {
+  const allocations = Array.isArray(record.fundingAllocations) ? record.fundingAllocations : [];
+  if (!allocations.length) return "Sem origem definida";
+  return allocations.map((allocation) => {
+    const label = allocation.sourceType === "salary"
+      ? "Salário"
+      : incomeNames.get(allocation.sourceId) || allocation.sourceLabel || "Receita removida";
+    return `${label}: ${formatCurrency(allocation.amountCents).replace(/\s/g, " ")}`;
+  }).join(" | ");
+}
+
+function rowFor(record, type, categoryNames, paymentNames, profileNames, incomeNames) {
   return [
     profileNames.get(record.profileId) || "Pessoal",
     record.month || monthFromDate(record.date),
@@ -158,6 +180,7 @@ function rowFor(record, type, categoryNames, paymentNames, profileNames) {
     record.description || (type === "Salário" ? "Salário líquido" : ""),
     categoryNames.get(record.categoryId) || "",
     paymentNames.get(record.paymentMethodId) || "",
+    type.startsWith("Despesa") ? fundingText(record, incomeNames) : "",
     record.status === "paid" ? "Pago" : record.status === "received" ? "Recebido" : "Pendente",
     formatCurrency(record.amountCents).replace(/\s/g, " "),
     record.notes || ""
@@ -169,23 +192,24 @@ export async function saveCsv({ scope = "all", type = "all", month, profileId = 
   const categoryNames = new Map(data.categories.map((record) => [record.id, record.name]));
   const paymentNames = new Map(data.paymentMethods.map((record) => [record.id, record.name]));
   const profileNames = new Map(data.profiles.map((record) => [record.id, record.name]));
+  const incomeNames = new Map(data.additionalIncomes.map((record) => [record.id, record.description]));
   const rows = [];
   const include = (record) =>
     (!profileId || profileId === "__all__" || record.profileId === profileId) &&
     (scope === "all" || (record.month || monthFromDate(record.date)) === month);
   if (type !== "expenses") {
-    data.monthlyIncomes.filter(include).forEach((record) => rows.push(rowFor({ ...record, date: `${record.month}-01` }, "Salário", categoryNames, paymentNames, profileNames)));
-    data.additionalIncomes.filter(include).forEach((record) => rows.push(rowFor(record, "Receita", categoryNames, paymentNames, profileNames)));
+    data.monthlyIncomes.filter(include).forEach((record) => rows.push(rowFor({ ...record, date: `${record.month}-01` }, "Salário", categoryNames, paymentNames, profileNames, incomeNames)));
+    data.additionalIncomes.filter(include).forEach((record) => rows.push(rowFor(record, "Receita", categoryNames, paymentNames, profileNames, incomeNames)));
   }
   if (type !== "incomes") {
     if (Array.isArray(expenseRecords)) {
-      expenseRecords.forEach((record) => rows.push(rowFor(record, record.expenseType === "fixed" ? "Despesa fixa" : "Despesa avulsa", categoryNames, paymentNames, profileNames)));
+      expenseRecords.forEach((record) => rows.push(rowFor(record, record.expenseType === "fixed" ? "Despesa fixa" : "Despesa avulsa", categoryNames, paymentNames, profileNames, incomeNames)));
     } else {
-      data.monthlyExpenseInstances.filter(include).forEach((record) => rows.push(rowFor(record, "Despesa fixa", categoryNames, paymentNames, profileNames)));
-      data.oneTimeExpenses.filter(include).forEach((record) => rows.push(rowFor(record, "Despesa avulsa", categoryNames, paymentNames, profileNames)));
+      data.monthlyExpenseInstances.filter(include).forEach((record) => rows.push(rowFor(record, "Despesa fixa", categoryNames, paymentNames, profileNames, incomeNames)));
+      data.oneTimeExpenses.filter(include).forEach((record) => rows.push(rowFor(record, "Despesa avulsa", categoryNames, paymentNames, profileNames, incomeNames)));
     }
   }
-  const header = ["Perfil", "Mês", "Data", "Tipo", "Descrição", "Categoria", "Forma de pagamento", "Status", "Valor", "Observação"].map(csvEscape).join(";");
+  const header = ["Perfil", "Mês", "Data", "Tipo", "Descrição", "Categoria", "Forma de pagamento", "Origem da renda", "Status", "Valor", "Observação"].map(csvEscape).join(";");
   const content = `\uFEFF${[header, ...rows].join("\r\n")}`;
   const scopeSuffix = scope === "month" ? `-${month}` : "-todos";
   downloadBlob(content, `${filenamePrefix}${scopeSuffix}-${localBackupDate()}.csv`, "text/csv;charset=utf-8");

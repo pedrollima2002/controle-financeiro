@@ -1,7 +1,7 @@
 import { nowIso, uid } from "./utils.js";
 
 export const DB_NAME = "meu-controle-financeiro";
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 export const DEFAULT_PROFILE_ID = "profile-default";
 export const STORES = [
   "settings",
@@ -71,7 +71,28 @@ function addProfileIndexesAndMigrate(transaction) {
     cursorRequest.onsuccess = () => {
       const cursor = cursorRequest.result;
       if (!cursor) return;
-      if (!cursor.value.profileId) cursor.update({ ...cursor.value, profileId: DEFAULT_PROFILE_ID });
+      const value = { ...cursor.value, profileId: cursor.value.profileId || DEFAULT_PROFILE_ID };
+      if (["monthlyExpenseInstances", "oneTimeExpenses"].includes(storeName) && !Array.isArray(value.fundingAllocations)) {
+        value.fundingAllocations = [];
+      }
+      if (storeName === "recurringExpenses" && !Array.isArray(value.fundingTemplate)) value.fundingTemplate = [];
+      cursor.update(value);
+      cursor.continue();
+    };
+  });
+}
+
+function migrateFundingAllocations(transaction) {
+  [
+    ["monthlyExpenseInstances", "fundingAllocations"],
+    ["oneTimeExpenses", "fundingAllocations"],
+    ["recurringExpenses", "fundingTemplate"]
+  ].forEach(([storeName, field]) => {
+    const request = transaction.objectStore(storeName).openCursor();
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return;
+      if (!Array.isArray(cursor.value[field])) cursor.update({ ...cursor.value, [field]: [] });
       cursor.continue();
     };
   });
@@ -109,6 +130,7 @@ export function openDatabase() {
         });
         addProfileIndexesAndMigrate(transaction);
       }
+      if (event.oldVersion >= 2 && event.oldVersion < 3) migrateFundingAllocations(transaction);
     };
     request.onsuccess = () => {
       const database = request.result;

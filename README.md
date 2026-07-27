@@ -13,6 +13,9 @@ Aplicação web estática de controle financeiro pessoal. Funciona sem conta, ba
 - categorias e formas de pagamento personalizáveis;
 - histórico por seletor de mês;
 - relatórios detalhados com filtros combináveis por período, perfil, categoria, pagamento, tipo, status e descrição;
+- escolha da renda usada por cada gasto: salário, receita adicional ou divisão entre várias rendas;
+- saldo utilizado e disponível de cada renda, com aviso quando o valor é ultrapassado;
+- relatórios separados para salário, receitas adicionais e visão consolidada de todas as rendas;
 - filtros de relatório salvos no navegador, totais filtrados e exportação do resultado em CSV;
 - gráficos nativos em Canvas com resumos textuais;
 - backup JSON, backup protegido por PBKDF2 + AES-GCM e restauração por mesclagem ou substituição;
@@ -53,12 +56,13 @@ controle-financeiro/
 │   └── utils.js
 └── tests/
     ├── index.html
+    ├── run-node.mjs
     └── tests.js
 ```
 
 ## Modelo de dados
 
-O banco `meu-controle-financeiro` usa IndexedDB, versão 2. A atualização da versão 1 é automática: registros existentes recebem o perfil **Pessoal** e não são apagados. Cada store tem chave primária `id`; os lançamentos incluem `profileId`, `createdAt`, `updatedAt`, `version` e `origin` quando aplicável.
+O banco `meu-controle-financeiro` usa IndexedDB, versão 3. As atualizações anteriores são automáticas: registros da versão 1 recebem o perfil **Pessoal** e gastos criados antes da versão 3 ficam como **Sem origem definida**. Nenhum lançamento é apagado. Cada store tem chave primária `id`; os lançamentos incluem `profileId`, `createdAt`, `updatedAt`, `version` e `origin` quando aplicável.
 
 | Store | Finalidade | Índices principais |
 |---|---|---|
@@ -74,6 +78,14 @@ O banco `meu-controle-financeiro` usa IndexedDB, versão 2. A atualização da v
 | `appMetadata` | versão e metadados técnicos | chave `id` |
 
 Valores monetários são inteiros em centavos. `R$ 32,50` é armazenado como `3250`. O mês de referência usa `AAAA-MM`.
+
+### Origem da renda
+
+Gastos avulsos e ocorrências de gastos fixos podem usar o salário, uma receita adicional específica ou uma divisão exata entre várias rendas. As parcelas ficam em `fundingAllocations`; a soma precisa ser igual ao valor do gasto. O aplicativo calcula valor original, utilizado, disponível e percentual de uso de cada renda.
+
+Em uma recorrência, a escolha exclusiva do salário é repetida nos próximos meses e ajustada ao valor da ocorrência. Receitas adicionais são lançamentos específicos, portanto escolhas que as utilizam valem somente para a ocorrência daquele mês; os meses seguintes ficam sem origem até serem definidos.
+
+Se o valor utilizado ultrapassar a renda disponível, o aplicativo avisa e exige uma segunda confirmação, mas permite salvar quando o excesso for intencional.
 
 ### Recorrências e histórico
 
@@ -138,7 +150,7 @@ Se a senha de um backup protegido for perdida, não há recuperação. A criptog
 
 ## Exportar CSV
 
-Escolha todos os meses ou apenas o mês selecionado e filtre por receitas/despesas. No relatório, o botão **Exportar resultado em CSV** respeita todos os filtros combinados. O arquivo identifica o perfil de cada lançamento, usa UTF-8 com BOM e separador `;`, adequado ao padrão de planilhas em português do Brasil.
+Escolha todos os meses ou apenas o mês selecionado e filtre por receitas/despesas. No relatório, o botão **Exportar resultado em CSV** respeita todos os filtros combinados, incluindo a origem da renda. O arquivo identifica o perfil e mostra a divisão utilizada em cada gasto, usa UTF-8 com BOM e separador `;`, adequado ao padrão de planilhas em português do Brasil.
 
 ## Atualizar a aplicação
 
@@ -165,9 +177,15 @@ O executor em `tests/` verifica:
 - mesclagem por identificador;
 - filtro mensal;
 - soma consolidada de perfis;
-- filtros combináveis e resumo de despesas.
+- filtros combináveis e resumo de despesas;
+- propagação segura do salário em recorrências;
+- bloqueio de receitas adicionais em meses diferentes;
+- filtros por origem da renda;
+- resumo de salário, receitas adicionais, divisões e gastos sem origem.
 
-Abra `/tests/` pelo mesmo servidor local. O resultado esperado é `17 de 17 testes passaram`.
+Abra `/tests/` pelo mesmo servidor local. O resultado esperado é `22 de 22 testes passaram`.
+
+Os mesmos testes podem ser executados diretamente com Node.js usando `node tests/run-node.mjs`.
 
 ## Compatibilidade e limites
 
