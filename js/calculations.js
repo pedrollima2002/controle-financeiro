@@ -114,6 +114,39 @@ export function summarizeFunding(records) {
   }, { salary: 0, additional: 0, allocated: 0, unassigned: 0, mixedExpenses: 0 });
 }
 
+export function summarizeFundingUsage(records) {
+  return records.reduce((summary, record) => {
+    const allocations = Array.isArray(record.fundingAllocations) ? record.fundingAllocations : [];
+    allocations.forEach((allocation) => {
+      const amount = Number.isSafeInteger(allocation.amountCents) ? allocation.amountCents : 0;
+      if (allocation.sourceType === "salary") {
+        summary.salary.used += amount;
+        summary.salary[record.status === "paid" ? "paid" : "pending"] += amount;
+      }
+      if (allocation.sourceType === "income") {
+        summary.additional.used += amount;
+        const current = summary.byIncome.get(allocation.sourceId) || {
+          sourceId: allocation.sourceId,
+          label: allocation.sourceLabel || "Receita adicional",
+          used: 0,
+          paid: 0,
+          pending: 0
+        };
+        current.used += amount;
+        current[record.status === "paid" ? "paid" : "pending"] += amount;
+        summary.byIncome.set(allocation.sourceId, current);
+      }
+    });
+    if (!allocations.length) summary.unassigned += record.amountCents || 0;
+    return summary;
+  }, {
+    salary: { used: 0, paid: 0, pending: 0 },
+    additional: { used: 0 },
+    byIncome: new Map(),
+    unassigned: 0
+  });
+}
+
 export function summarizeExpenses(records) {
   const total = sumCents(records);
   const paid = sumCents(records.filter((record) => record.status === "paid"));

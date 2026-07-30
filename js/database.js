@@ -1,7 +1,8 @@
 import { nowIso, uid } from "./utils.js";
+import { normalizeExpenseFunding, normalizeRecurringFunding } from "./funding.js";
 
 export const DB_NAME = "meu-controle-financeiro";
-export const DB_VERSION = 3;
+export const DB_VERSION = 4;
 export const DEFAULT_PROFILE_ID = "profile-default";
 export const STORES = [
   "settings",
@@ -54,7 +55,7 @@ function addIndex(store, indexName, keyPath, options) {
   if (!store.indexNames.contains(indexName)) store.createIndex(indexName, keyPath, options);
 }
 
-function addProfileIndexesAndMigrate(transaction) {
+function addProfileIndexesAndMigrate(transaction, migrateFunding = false) {
   const profileIndexes = {
     categories: [["profileId", "profileId"], ["profileActive", ["profileId", "active"]]],
     paymentMethods: [["profileId", "profileId"], ["profileActive", ["profileId", "active"]]],
@@ -71,28 +72,29 @@ function addProfileIndexesAndMigrate(transaction) {
     cursorRequest.onsuccess = () => {
       const cursor = cursorRequest.result;
       if (!cursor) return;
-      const value = { ...cursor.value, profileId: cursor.value.profileId || DEFAULT_PROFILE_ID };
-      if (["monthlyExpenseInstances", "oneTimeExpenses"].includes(storeName) && !Array.isArray(value.fundingAllocations)) {
-        value.fundingAllocations = [];
+      let value = { ...cursor.value, profileId: cursor.value.profileId || DEFAULT_PROFILE_ID };
+      if (migrateFunding && ["monthlyExpenseInstances", "oneTimeExpenses"].includes(storeName)) {
+        value = normalizeExpenseFunding(value);
       }
-      if (storeName === "recurringExpenses" && !Array.isArray(value.fundingTemplate)) value.fundingTemplate = [];
+      if (migrateFunding && storeName === "recurringExpenses") value = normalizeRecurringFunding(value);
       cursor.update(value);
       cursor.continue();
     };
   });
 }
 
-function migrateFundingAllocations(transaction) {
+function migrateDefaultFunding(transaction) {
   [
-    ["monthlyExpenseInstances", "fundingAllocations"],
-    ["oneTimeExpenses", "fundingAllocations"],
-    ["recurringExpenses", "fundingTemplate"]
-  ].forEach(([storeName, field]) => {
+    ["monthlyExpenseInstances", normalizeExpenseFunding],
+    ["oneTimeExpenses", normalizeExpenseFunding],
+    ["recurringExpenses", normalizeRecurringFunding]
+  ].forEach(([storeName, normalize]) => {
     const request = transaction.objectStore(storeName).openCursor();
     request.onsuccess = () => {
       const cursor = request.result;
       if (!cursor) return;
-      if (!Array.isArray(cursor.value[field])) cursor.update({ ...cursor.value, [field]: [] });
+      const normalized = normalize(cursor.value);
+      if (normalized !== cursor.value) cursor.update(normalized);
       cursor.continue();
     };
   });
@@ -128,9 +130,9 @@ export function openDatabase() {
           id: DEFAULT_PROFILE_ID, name: "Pessoal", icon: "👤", color: "#0f766e",
           createdAt: timestamp, updatedAt: timestamp, version: 1
         });
-        addProfileIndexesAndMigrate(transaction);
+        addProfileIndexesAndMigrate(transaction, true);
       }
-      if (event.oldVersion >= 2 && event.oldVersion < 3) migrateFundingAllocations(transaction);
+      if (event.oldVersion >= 2 && event.oldVersion < 4) migrateDefaultFunding(transaction);
     };
     request.onsuccess = () => {
       const database = request.result;

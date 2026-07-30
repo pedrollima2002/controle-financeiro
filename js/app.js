@@ -5,10 +5,14 @@ import {
 } from "./database.js";
 import {
   balanceState, calculateMonth, combineExpenseRecords, filterExpenseRecords, groupByCategory,
-  sortLargest, sumCents, summarizeExpenses, summarizeFunding
+  sortLargest, sumCents, summarizeExpenses, summarizeFunding, summarizeFundingUsage
 } from "./calculations.js";
-import { drawBars, drawDonut, drawLine } from "./charts.js";
-import { ensureOccurrencesForMonth } from "./recurring.js";
+import { drawBars, drawDonut, drawLine, observeChartContainers } from "./charts.js";
+import {
+  ensureOccurrencesForMonth, filterValidOccurrences, shouldGenerateForMonth,
+  synchronizeAllRecurringOccurrences, synchronizeRecurringOccurrences
+} from "./recurring.js";
+import { fundingMatchesAmount, salaryFundingAllocation } from "./funding.js";
 import {
   backupSummary, decryptBackup, restoreBackup, saveBackup, saveCsv, validateBackup
 } from "./export.js";
@@ -45,11 +49,14 @@ const state = {
   editorFundingSources: [],
   editorFundingMonth: "",
   editorFundingWarningConfirmed: false,
+  editorUnassignedWarningConfirmed: false,
   confirmResolve: null,
   pendingImportWrapper: null,
   pendingBackup: null,
   deferredInstallPrompt: null,
-  registration: null
+  registration: null,
+  chartObserver: null,
+  loadingCount: 0
 };
 
 const dom = {};
@@ -98,13 +105,13 @@ function allocationsFor(record, field = "fundingAllocations") {
 }
 
 function fundingSourceLabel(allocation) {
-  if (allocation.sourceType === "salary") return "Salário";
+  if (allocation.sourceType === "salary") return "Salário principal";
   return incomeById(allocation.sourceId)?.description || allocation.sourceLabel || "Receita removida";
 }
 
 function fundingDescription(record, { amounts = false, field = "fundingAllocations" } = {}) {
   const allocations = allocationsFor(record, field);
-  if (!allocations.length) return "Sem origem definida";
+  if (!allocations.length) return "Não descontado de nenhuma renda";
   return allocations.map((allocation) => {
     const label = fundingSourceLabel(allocation);
     return amounts ? `${label}: ${formatCurrency(allocation.amountCents)}` : label;
@@ -113,8 +120,8 @@ function fundingDescription(record, { amounts = false, field = "fundingAllocatio
 
 function recurringFundingDescription(record) {
   const template = allocationsFor(record, "fundingTemplate");
-  if (!template.length) return "Sem origem definida";
-  if (template.length === 1 && template[0].sourceType === "salary") return "Salário todo mês";
+  if (!template.length) return "Não descontado de nenhuma renda";
+  if (template.length === 1 && template[0].sourceType === "salary") return "Salário principal todo mês";
   const sourceMonth = template[0].sourceMonth;
   return `${fundingDescription(record, { field: "fundingTemplate" })}${sourceMonth ? ` · somente ${monthLabel(sourceMonth, { month: "short", year: "numeric" })}` : " · somente mês inicial"}`;
 }
@@ -125,7 +132,7 @@ function allocationSourceValue(allocation) {
 
 function allocationFromSourceValue(value, amountCents, month) {
   if (value === "salary") {
-    return { id: uid(), sourceType: "salary", sourceId: null, sourceLabel: "Salário", sourceMonth: month, amountCents };
+    return salaryFundingAllocation(amountCents, month);
   }
   const sourceId = String(value).replace(/^income:/, "");
   const income = incomeById(sourceId) || state.editorFundingSources.find((source) => source.value === value)?.record;
@@ -180,19 +187,25 @@ function hideEmpty(target) {
 }
 
 function statusPill(status) {
-  const labels = { paid: "Pago", pending: "Pendente", received: "Recebido", active: "Ativo", inactive: "Inativo" };
+  const labels = {
+    paid: "Pago", pending: "Pendente", received: "Recebido", active: "Ativo",
+    inactive: "Desativado", scheduled: "Programado", ended: "Encerrado"
+  };
   return createElement("span", { className: `status-pill ${status}`, text: labels[status] || status });
 }
 
 function actionButton(action, id, label, symbol, extraClass = "") {
   return createElement("button", {
     className: `table-action ${extraClass}`.trim(), type: "button", title: label, ariaLabel: label,
-    dataset: { action, id }, text: symbol
-  });
+    dataset: { action, id }
+  }, [
+    createElement("span", { className: "action-symbol", ariaHidden: "true", text: symbol }),
+    createElement("span", { className: "action-label", text: label })
+  ]);
 }
 
-function tableCell(content, className = "") {
-  const cell = createElement("td", { className });
+function tableCell(content, className = "", label = "") {
+  const cell = createElement("td", { className, dataset: label ? { label } : undefined });
   if (content instanceof Node) cell.append(content);
   else cell.textContent = content ?? "";
   return cell;
@@ -213,7 +226,21 @@ function miniMetric(label, value) {
   ]);
 }
 
-function fundingSummaryCard(label, totalCents, usedCents, colorClass = "") {
+function usageStat(label, value, negative = false) {
+  return createElement("div", { className: "usage-stat" }, [
+    createElement("span", { text: label }),
+    createElement("strong", { className: negative ? "negative-text" : "", text: value })
+  ]);
+}
+
+function setLoading(active) {
+  state.loadingCount = Math.max(0, state.loadingCount + (active ? 1 : -1));
+  if (!dom.loadingIndicator) return;
+  dom.loadingIndicator.hidden = state.loadingCount === 0;
+  document.querySelector("main")?.setAttribute("aria-busy", String(state.loadingCount > 0));
+}
+
+function fundingSummaryCard(label, totalCents, usedCents, colorClass = "", details = []) {
   const availableCents = totalCents - usedCents;
   const percent = totalCents > 0 ? Math.round((usedCents / totalCents) * 1000) / 10 : usedCents > 0 ? 100 : 0;
   return createElement("article", { className: `funding-summary-card ${colorClass}`.trim() }, [
@@ -222,7 +249,8 @@ function fundingSummaryCard(label, totalCents, usedCents, colorClass = "") {
     createElement("div", { className: "funding-card-values" }, [
       createElement("span", { text: `Renda: ${formatCurrency(totalCents)}` }),
       createElement("span", { className: availableCents < 0 ? "negative-text" : "", text: `Disponível: ${formatCurrency(availableCents)}` }),
-      createElement("span", { text: `${percent.toLocaleString("pt-BR")}% usado` })
+      createElement("span", { text: `${percent.toLocaleString("pt-BR")}% usado` }),
+      ...details.map((detail) => createElement("span", { text: detail }))
     ])
   ]);
 }
@@ -249,7 +277,11 @@ async function fundingSourcesFor(profileId, month, record = {}) {
     getByProfileMonth("oneTimeExpenses", profileId, month)
   ]);
   const usage = new Map();
-  [...instances, ...expenses]
+  const validInstances = filterValidOccurrences(
+    instances,
+    state.recurring.filter((recurring) => recurring.profileId === profileId)
+  );
+  [...validInstances, ...expenses]
     .filter((expense) => expense.id !== record.id)
     .flatMap((expense) => allocationsFor(expense))
     .forEach((allocation) => {
@@ -258,9 +290,9 @@ async function fundingSourcesFor(profileId, month, record = {}) {
     });
   const salaryTotal = sumCents(salaries);
   const sources = [{
-    value: "salary", label: "Salário", amountCents: salaryTotal,
+    value: "salary", label: "Salário principal", amountCents: salaryTotal,
     usedCents: usage.get("salary") || 0, availableCents: salaryTotal - (usage.get("salary") || 0),
-    sourceType: "salary", record: null
+    sourceType: "salary", record: null, missingSalary: salaries.length === 0
   }, ...incomes.map((income) => {
     const value = `income:${income.id}`;
     const usedCents = usage.get(value) || 0;
@@ -303,26 +335,32 @@ async function refreshReferenceData() {
 
 async function loadMonth() {
   if (!state.month) return;
-  await ensureOccurrencesForMonth(state.month, isAllProfiles() ? "" : state.activeProfileId);
-  await refreshReferenceData();
-  const [salaries, incomes, instances, expenses] = await Promise.all([
-    getByIndex("monthlyIncomes", "month", state.month),
-    getByIndex("additionalIncomes", "month", state.month),
-    getByIndex("monthlyExpenseInstances", "month", state.month),
-    getByIndex("oneTimeExpenses", "month", state.month)
-  ]);
-  state.salaries = profileScoped(salaries);
-  state.salary = isAllProfiles() ? null : state.salaries[0] || null;
-  state.incomes = profileScoped(incomes).sort((left, right) => right.date.localeCompare(left.date));
-  state.instances = profileScoped(instances).sort((left, right) => String(left.date || "9999").localeCompare(String(right.date || "9999")));
-  state.expenses = profileScoped(expenses).sort((left, right) => right.date.localeCompare(left.date));
-  state.metrics = calculateMonth({
-    salaries: state.salaries,
-    additionalIncomes: state.incomes,
-    fixedExpenses: state.instances,
-    oneTimeExpenses: state.expenses
-  });
-  await renderAll();
+  setLoading(true);
+  try {
+    await ensureOccurrencesForMonth(state.month, isAllProfiles() ? "" : state.activeProfileId);
+    await refreshReferenceData();
+    const [salaries, incomes, instances, expenses] = await Promise.all([
+      getByIndex("monthlyIncomes", "month", state.month),
+      getByIndex("additionalIncomes", "month", state.month),
+      getByIndex("monthlyExpenseInstances", "month", state.month),
+      getByIndex("oneTimeExpenses", "month", state.month)
+    ]);
+    state.salaries = profileScoped(salaries);
+    state.salary = isAllProfiles() ? null : state.salaries[0] || null;
+    state.incomes = profileScoped(incomes).sort((left, right) => right.date.localeCompare(left.date));
+    state.instances = filterValidOccurrences(profileScoped(instances), state.recurring)
+      .sort((left, right) => String(left.date || "9999").localeCompare(String(right.date || "9999")));
+    state.expenses = profileScoped(expenses).sort((left, right) => right.date.localeCompare(left.date));
+    state.metrics = calculateMonth({
+      salaries: state.salaries,
+      additionalIncomes: state.incomes,
+      fixedExpenses: state.instances,
+      oneTimeExpenses: state.expenses
+    });
+    await renderAll();
+  } finally {
+    setLoading(false);
+  }
 }
 
 function renderMonthLabels() {
@@ -350,8 +388,63 @@ function renderDashboardNotices() {
   dom.undatedExpensesText.textContent = `${undated.length} pendência(s), somando ${formatCurrency(sumCents(undated))}.`;
 }
 
+function usagePercent(usedCents, totalCents) {
+  return totalCents > 0 ? Math.round((usedCents / totalCents) * 1000) / 10 : usedCents > 0 ? 100 : 0;
+}
+
+function renderMonthlyFundingUsage(expenses) {
+  const usage = summarizeFundingUsage(expenses);
+  const salaryTotal = state.metrics.salaryAmount;
+  const salaryReceived = sumCents(state.salaries.filter((salary) => salary.status === "received"));
+  const salaryAvailable = salaryTotal - usage.salary.used;
+  replaceChildren(dom.dashboardSalaryUse, [
+    usageStat("Salário previsto", formatCurrency(salaryTotal)),
+    usageStat("Salário recebido", formatCurrency(salaryReceived)),
+    usageStat("Gastos vinculados", formatCurrency(usage.salary.used)),
+    usageStat("Saldo restante", formatCurrency(salaryAvailable), salaryAvailable < 0),
+    usageStat("Comprometido", `${usagePercent(usage.salary.used, salaryTotal).toLocaleString("pt-BR")}%`),
+    usageStat("Pagos com salário", formatCurrency(usage.salary.paid)),
+    usageStat("Pendentes no salário", formatCurrency(usage.salary.pending))
+  ]);
+
+  const otherTotal = state.metrics.otherIncomeAmount;
+  const otherAvailable = otherTotal - usage.additional.used;
+  replaceChildren(dom.dashboardOtherUse, [
+    usageStat("Total das receitas", formatCurrency(otherTotal)),
+    usageStat("Valor utilizado", formatCurrency(usage.additional.used)),
+    usageStat("Valor disponível", formatCurrency(otherAvailable), otherAvailable < 0),
+    usageStat("Percentual utilizado", `${usagePercent(usage.additional.used, otherTotal).toLocaleString("pt-BR")}%`)
+  ]);
+  if (!state.incomes.length) {
+    replaceChildren(dom.dashboardIncomeUsage, createElement("div", { className: "empty-state" }, [
+      createElement("strong", { text: "Nenhuma receita adicional" }),
+      createElement("span", { text: "As receitas extras deste mês aparecerão detalhadas aqui." })
+    ]));
+    return usage;
+  }
+  replaceChildren(dom.dashboardIncomeUsage, state.incomes.map((income) => {
+    const incomeUsage = usage.byIncome.get(income.id) || { used: 0 };
+    const available = income.amountCents - incomeUsage.used;
+    const percent = usagePercent(incomeUsage.used, income.amountCents);
+    return createElement("div", { className: "income-usage-item" }, [
+      createElement("div", {}, [
+        createElement("strong", { text: income.description }),
+        createElement("strong", { className: available < 0 ? "negative-text" : "", text: formatCurrency(available) })
+      ]),
+      createElement("span", {
+        text: `${income.status === "received" ? "Recebida" : "Prevista"}: ${formatCurrency(income.amountCents)} · usado ${formatCurrency(incomeUsage.used)} · ${percent.toLocaleString("pt-BR")}%`
+      }),
+      createElement("progress", { max: "100", value: String(Math.min(100, Math.max(0, percent))), ariaLabel: `Uso de ${income.description}` })
+    ]);
+  }));
+  return usage;
+}
+
 function renderDashboard() {
   const metrics = state.metrics;
+  const combinedExpenses = combineExpenseRecords(state.instances, state.expenses);
+  const fundingUsage = renderMonthlyFundingUsage(combinedExpenses);
+  const salaryAvailable = metrics.salaryAmount - fundingUsage.salary.used;
   const status = balanceState(metrics.forecastBalance, metrics.totalIncome);
   const statusContent = {
     positive: ["✓", "Saldo previsto positivo", "Você está dentro do planejamento deste mês."],
@@ -364,17 +457,22 @@ function renderDashboard() {
   dom.balanceMessage.textContent = statusContent[2];
   dom.balanceValue.textContent = formatCurrency(metrics.forecastBalance);
   replaceChildren(dom.dashboardMetrics, [
-    metricCard(isAllProfiles() ? "Salários líquidos" : "Salário líquido", formatCurrency(metrics.salaryAmount), isAllProfiles() ? `${state.salaries.length} perfil(is)` : state.salary?.status === "received" ? "Recebido" : "Previsto"),
-    metricCard("Outras receitas", formatCurrency(metrics.otherIncomeAmount), `${state.incomes.length} lançamento(s)`),
+    metricCard("Saldo previsto", formatCurrency(metrics.forecastBalance), "Receitas − despesas", true),
     metricCard("Total de receitas", formatCurrency(metrics.totalIncome), `${formatCurrency(metrics.receivedIncome)} recebidos`),
-    metricCard("Gastos fixos", formatCurrency(metrics.fixedAmount), `${state.instances.filter((item) => item.status === "pending").length} pendente(s)`),
-    metricCard("Gastos avulsos", formatCurrency(metrics.oneTimeAmount), `${state.expenses.length} lançamento(s)`),
     metricCard("Despesas totais", formatCurrency(metrics.totalExpenses), `${formatCurrency(metrics.paidExpenses)} pagos`),
     metricCard("Saldo realizado", formatCurrency(metrics.realizedBalance), "Entradas recebidas − despesas pagas"),
+    metricCard("Salário utilizado", formatCurrency(fundingUsage.salary.used), `${fundingUsage.salary.paid ? formatCurrency(fundingUsage.salary.paid) : "R$ 0,00"} pagos`),
+    metricCard("Salário disponível", formatCurrency(salaryAvailable), state.salary ? "Após os gastos vinculados" : "Salário ainda não definido")
+  ]);
+  replaceChildren(dom.dashboardMoreMetrics, [
+    metricCard(isAllProfiles() ? "Salários líquidos" : "Salário líquido", formatCurrency(metrics.salaryAmount), isAllProfiles() ? `${state.salaries.length} perfil(is)` : state.salary?.status === "received" ? "Recebido" : "Previsto"),
+    metricCard("Outras receitas", formatCurrency(metrics.otherIncomeAmount), `${state.incomes.length} lançamento(s)`),
+    metricCard("Gastos fixos", formatCurrency(metrics.fixedAmount), `${state.instances.filter((item) => item.status === "pending").length} pendente(s)`),
+    metricCard("Gastos avulsos", formatCurrency(metrics.oneTimeAmount), `${state.expenses.length} lançamento(s)`),
     metricCard("Renda comprometida", `${metrics.committedPercent.toLocaleString("pt-BR")}%`, "Sobre as receitas previstas", true)
   ]);
 
-  const grouped = groupByCategory(combineExpenseRecords(state.instances, state.expenses));
+  const grouped = groupByCategory(combinedExpenses);
   const chartEntries = Object.entries(grouped)
     .map(([categoryId, value]) => ({ label: categoryInfo(categoryId).name, value, color: categoryInfo(categoryId).color }))
     .sort((a, b) => b.value - a.value);
@@ -450,10 +548,28 @@ function renderIncomes() {
       actionButton("delete-income", record.id, "Excluir receita", "×", "delete")
     ]);
     return createElement("tr", {}, [
-      tableCell(formatDate(record.date)), tableCell(record.description), tableCell(`${category.icon} ${category.name}${isAllProfiles() ? ` · ${profileName(record.profileId)}` : ""}`),
-      tableCell(statusPill(record.status)), tableCell(formatCurrency(record.amountCents), "numeric"), tableCell(actions)
+      tableCell(formatDate(record.date), "", "Data"),
+      tableCell(record.description, "card-title", "Descrição"),
+      tableCell(`${category.icon} ${category.name}${isAllProfiles() ? ` · ${profileName(record.profileId)}` : ""}`, "", "Categoria"),
+      tableCell(statusPill(record.status), "", "Status"),
+      tableCell(formatCurrency(record.amountCents), "numeric card-value", "Valor"),
+      tableCell(actions, "card-actions", "Ações")
     ]);
   }));
+}
+
+function recurringPeriod(record) {
+  const start = monthLabel(monthFromDate(record.startDate), { month: "short", year: "numeric" });
+  if (!record.endDate) return `Desde ${start}`;
+  const end = monthLabel(monthFromDate(record.endDate), { month: "short", year: "numeric" });
+  return `${start} até ${end}`;
+}
+
+function recurringSituation(record) {
+  if (!record.active) return "inactive";
+  if (monthFromDate(record.startDate) > state.month) return "scheduled";
+  if (record.endDate && monthFromDate(record.endDate) < state.month) return "ended";
+  return "active";
 }
 
 function renderRecurring() {
@@ -472,11 +588,17 @@ function renderRecurring() {
       const actions = createElement("div", { className: "row-actions" }, [
         actionButton("toggle-instance", record.id, record.status === "paid" ? "Marcar como pendente" : "Marcar como pago", record.status === "paid" ? "↶" : "✓"),
         actionButton("edit-instance", record.id, "Editar somente este mês", "✎"),
+        ...(record.recurringId ? [actionButton("edit-recurring", record.recurringId, "Editar gasto fixo completo", "⚙")] : []),
         actionButton("delete-instance", record.id, "Excluir somente esta ocorrência", "×", "delete")
       ]);
       return createElement("tr", {}, [
-        tableCell(record.date ? formatDate(record.date) : "Sem vencimento"), tableCell(record.description), tableCell(`${category.icon} ${category.name}${isAllProfiles() ? ` · ${profileName(record.profileId)}` : ""}`),
-        tableCell(fundingDescription(record)), tableCell(statusPill(record.status)), tableCell(formatCurrency(record.amountCents), "numeric"), tableCell(actions)
+        tableCell(record.date ? formatDate(record.date) : "Sem vencimento", "", "Vencimento"),
+        tableCell(record.description, "card-title", "Descrição"),
+        tableCell(`${category.icon} ${category.name}${isAllProfiles() ? ` · ${profileName(record.profileId)}` : ""}`, "", "Categoria"),
+        tableCell(fundingDescription(record), "", "Origem do dinheiro"),
+        tableCell(statusPill(record.status), "", "Status"),
+        tableCell(formatCurrency(record.amountCents), "numeric card-value", "Valor"),
+        tableCell(actions, "card-actions", "Ações")
       ]);
     }));
   }
@@ -488,14 +610,21 @@ function renderRecurring() {
     hideEmpty(dom.recurringEmpty);
     replaceChildren(dom.recurringTableBody, recurring.map((record) => {
       const category = categoryInfo(record.categoryId);
+      const situation = recurringSituation(record);
       const actions = createElement("div", { className: "row-actions" }, [
-        actionButton("edit-recurring", record.id, "Editar recorrência", "✎"),
+        actionButton("edit-recurring", record.id, "Editar gasto fixo completo", "✎"),
         actionButton("toggle-recurring", record.id, record.active ? "Desativar recorrência" : "Ativar recorrência", record.active ? "◉" : "○"),
         actionButton("delete-recurring", record.id, "Excluir recorrência", "×", "delete")
       ]);
       return createElement("tr", {}, [
-        tableCell(record.description), tableCell(record.dueDay ? `Dia ${record.dueDay}` : "Sem vencimento"), tableCell(`${category.icon} ${category.name}${isAllProfiles() ? ` · ${profileName(record.profileId)}` : ""}`),
-        tableCell(recurringFundingDescription(record)), tableCell(statusPill(record.active ? "active" : "inactive")), tableCell(formatCurrency(record.amountCents), "numeric"), tableCell(actions)
+        tableCell(record.description, "card-title", "Descrição"),
+        tableCell(record.dueDay ? `Dia ${record.dueDay}` : "Sem vencimento", "", "Vencimento"),
+        tableCell(recurringPeriod(record), "", "Período"),
+        tableCell(`${category.icon} ${category.name}${isAllProfiles() ? ` · ${profileName(record.profileId)}` : ""}`, "", "Categoria"),
+        tableCell(recurringFundingDescription(record), "", "Origem futura"),
+        tableCell(statusPill(situation), "", "Situação"),
+        tableCell(formatCurrency(record.amountCents), "numeric card-value", "Valor"),
+        tableCell(actions, "card-actions", "Ações")
       ]);
     }));
   }
@@ -566,8 +695,14 @@ function renderExpenses() {
       actionButton("delete-expense", record.id, "Excluir gasto", "×", "delete")
     ]);
     return createElement("tr", {}, [
-      tableCell(formatDate(record.date)), tableCell(record.description), tableCell(`${category.icon} ${category.name}`),
-      tableCell(payment), tableCell(fundingDescription(record)), tableCell(statusPill(record.status)), tableCell(formatCurrency(record.amountCents), "numeric"), tableCell(actions)
+      tableCell(formatDate(record.date), "", "Data"),
+      tableCell(record.description, "card-title", "Descrição"),
+      tableCell(`${category.icon} ${category.name}`, "", "Categoria"),
+      tableCell(payment, "", "Pagamento"),
+      tableCell(fundingDescription(record), "", "Origem do dinheiro"),
+      tableCell(statusPill(record.status), "", "Status"),
+      tableCell(formatCurrency(record.amountCents), "numeric card-value", "Valor"),
+      tableCell(actions, "card-actions", "Ações")
     ]);
   }));
 }
@@ -678,6 +813,17 @@ function reportFilterValues() {
   };
 }
 
+function updateReportFilterCount() {
+  const values = Object.fromEntries(new FormData(dom.reportFilters).entries());
+  const count = Object.entries(values).filter(([name, value]) => {
+    if (!value) return false;
+    if (name === "period") return value !== "month";
+    if (name === "profileId") return value !== state.activeProfileId;
+    return true;
+  }).length;
+  dom.reportActiveFilterCount.textContent = `${count} ${count === 1 ? "ativo" : "ativos"}`;
+}
+
 function monthsBetween(startDate, endDate, availableMonths = []) {
   const normalizedAvailable = [...new Set(availableMonths)].filter(Boolean).sort();
   if (!startDate && !endDate) return normalizedAvailable;
@@ -707,10 +853,11 @@ async function reportData() {
       dom.reportProfile.value === ALL_PROFILES ? "" : dom.reportProfile.value
     )));
   }
-  const [fixed, oneTime, salaries, incomes] = await Promise.all([
-    getAll("monthlyExpenseInstances"), getAll("oneTimeExpenses"), getAll("monthlyIncomes"), getAll("additionalIncomes")
+  const [fixed, oneTime, salaries, incomes, recurring] = await Promise.all([
+    getAll("monthlyExpenseInstances"), getAll("oneTimeExpenses"), getAll("monthlyIncomes"),
+    getAll("additionalIncomes"), getAll("recurringExpenses")
   ]);
-  return { fixed, oneTime, salaries, incomes };
+  return { fixed: filterValidOccurrences(fixed, recurring), oneTime, salaries, incomes, recurring };
 }
 
 async function getFilteredReportRecords() {
@@ -769,6 +916,7 @@ function buildIncomeSourceStats(data, expenses, incomeInPeriod) {
 }
 
 async function renderReports() {
+  updateReportFilterCount();
   const { filters, data, records: combined } = await getFilteredReportRecords();
   const summary = summarizeExpenses(combined);
   const funding = summarizeFunding(combined);
@@ -778,7 +926,7 @@ async function renderReports() {
     miniMetric("Pago", formatCurrency(summary.paid)),
     miniMetric("Pendente", formatCurrency(summary.pending)),
     miniMetric("Com origem definida", formatCurrency(funding.allocated)),
-    miniMetric("Sem origem definida", formatCurrency(funding.unassigned))
+    miniMetric("Sem vínculo explícito", formatCurrency(funding.unassigned))
   ]);
   const grouped = groupByCategory(combined);
   const categoryEntries = Object.entries(grouped)
@@ -810,21 +958,30 @@ async function renderReports() {
       (!filters.endDate || date <= filters.endDate);
   };
   const totalIncome = sumCents(data.salaries.filter(incomeInPeriod)) + sumCents(data.incomes.filter(incomeInPeriod));
-  let sourceStats = buildIncomeSourceStats(data, combined, incomeInPeriod);
+  const fundingUsage = summarizeFundingUsage(combined);
+  const allSourceStats = buildIncomeSourceStats(data, combined, incomeInPeriod);
+  const salarySources = allSourceStats.filter((source) => source.sourceType === "salary");
+  const additionalSources = allSourceStats.filter((source) => source.sourceType === "income");
+  const salaryTotal = sumCents(salarySources);
+  const salaryReceived = sumCents(data.salaries.filter((record) => incomeInPeriod(record) && record.status === "received"));
+  const salaryUsed = sumCents(salarySources, "usedCents");
+  const additionalTotal = sumCents(additionalSources);
+  const additionalUsed = sumCents(additionalSources, "usedCents");
+  let sourceStats = allSourceStats;
   if (filters.fundingSource === "salary") sourceStats = sourceStats.filter((source) => source.sourceType === "salary");
   if (filters.fundingSource?.startsWith("income:")) {
     const sourceId = filters.fundingSource.slice(7);
     sourceStats = sourceStats.filter((source) => source.sourceId === sourceId);
   }
-  const salarySources = sourceStats.filter((source) => source.sourceType === "salary");
-  const additionalSources = sourceStats.filter((source) => source.sourceType === "income");
-  const salaryTotal = sumCents(salarySources);
-  const salaryUsed = sumCents(salarySources, "usedCents");
-  const additionalTotal = sumCents(additionalSources);
-  const additionalUsed = sumCents(additionalSources, "usedCents");
   replaceChildren(dom.fundingSummaryGrid, [
-    fundingSummaryCard("Salários", salaryTotal, salaryUsed, "salary"),
-    fundingSummaryCard("Receitas adicionais", additionalTotal, additionalUsed, "additional"),
+    fundingSummaryCard("Uso do salário", salaryTotal, salaryUsed, "salary", [
+      `Recebido: ${formatCurrency(salaryReceived)}`,
+      `Gastos pagos: ${formatCurrency(fundingUsage.salary.paid)}`,
+      `Gastos pendentes: ${formatCurrency(fundingUsage.salary.pending)}`
+    ]),
+    fundingSummaryCard("Uso das outras receitas", additionalTotal, additionalUsed, "additional", [
+      `${additionalSources.length} receita(s) no período`
+    ]),
     fundingSummaryCard("Todas as rendas", salaryTotal + additionalTotal, salaryUsed + additionalUsed, "combined")
   ]);
   const comparisonEntries = [
@@ -875,11 +1032,11 @@ async function renderReports() {
   const fundingEntries = [
     { label: "Salário", value: funding.salary, color: "#0f766e" },
     { label: "Receitas adicionais", value: funding.additional, color: "#4472c4" },
-    { label: "Sem origem", value: funding.unassigned, color: "#9a7226" }
+    { label: "Sem vínculo", value: funding.unassigned, color: "#9a7226" }
   ];
   drawDonut(dom.fundingSourceChart, fundingEntries);
   dom.fundingSourceSummary.textContent =
-    `Salário: ${formatCurrency(funding.salary)}. Receitas adicionais: ${formatCurrency(funding.additional)}. Sem origem definida: ${formatCurrency(funding.unassigned)}.`;
+    `Salário: ${formatCurrency(funding.salary)}. Receitas adicionais: ${formatCurrency(funding.additional)}. Sem vínculo explícito: ${formatCurrency(funding.unassigned)}.`;
 
   const totalAvailable = salaryTotal + additionalTotal - salaryUsed - additionalUsed;
   const fundingBalanceEntries = [
@@ -899,13 +1056,17 @@ async function renderReports() {
   } else {
     hideEmpty(dom.fundingSourceEmpty);
     replaceChildren(dom.fundingSourceBody, sourceStats.map((source) => createElement("tr", {}, [
-      tableCell(profileName(source.profileId)),
-      tableCell(monthLabel(source.month, { month: "short", year: "numeric" })),
-      tableCell(`${source.sourceType === "salary" ? "Salário" : source.label}${source.missing ? " (removida)" : ""}`),
-      tableCell(formatCurrency(source.amountCents), "numeric"),
-      tableCell(formatCurrency(source.usedCents), "numeric"),
-      tableCell(formatCurrency(source.availableCents), `numeric${source.availableCents < 0 ? " negative-text" : ""}`),
-      tableCell(`${source.usedPercent.toLocaleString("pt-BR")}%`)
+      tableCell(profileName(source.profileId), "", "Perfil"),
+      tableCell(monthLabel(source.month, { month: "short", year: "numeric" }), "", "Mês"),
+      tableCell(
+        `${source.sourceType === "salary" ? "Salário principal" : source.label}${source.missing ? source.sourceType === "salary" ? " (não definido)" : " (removida)" : ""}`,
+        "card-title",
+        "Renda"
+      ),
+      tableCell(formatCurrency(source.amountCents), "numeric", "Valor"),
+      tableCell(formatCurrency(source.usedCents), "numeric", "Utilizado"),
+      tableCell(formatCurrency(source.availableCents), `numeric${source.availableCents < 0 ? " negative-text" : ""}`, "Disponível"),
+      tableCell(`${source.usedPercent.toLocaleString("pt-BR")}%`, "card-value", "Uso")
     ])));
   }
 
@@ -923,15 +1084,15 @@ async function renderReports() {
     replaceChildren(dom.reportExpenseBody, combined.map((record) => {
       const category = categoryInfo(record.categoryId);
       return createElement("tr", {}, [
-        tableCell(profileName(record.profileId)),
-        tableCell(record.date ? formatDate(record.date) : "Sem vencimento"),
-        tableCell(record.description),
-        tableCell(`${category.icon} ${category.name}`),
-        tableCell(paymentById(record.paymentMethodId)?.name || "—"),
-        tableCell(fundingDescription(record, { amounts: true })),
-        tableCell(record.expenseType === "fixed" ? "Fixo" : "Avulso"),
-        tableCell(statusPill(record.status)),
-        tableCell(formatCurrency(record.amountCents), "numeric")
+        tableCell(profileName(record.profileId), "", "Perfil"),
+        tableCell(record.date ? formatDate(record.date) : "Sem vencimento", "", "Data"),
+        tableCell(record.description, "card-title", "Descrição"),
+        tableCell(`${category.icon} ${category.name}`, "", "Categoria"),
+        tableCell(paymentById(record.paymentMethodId)?.name || "—", "", "Pagamento"),
+        tableCell(fundingDescription(record, { amounts: true }), "", "Origem do dinheiro"),
+        tableCell(record.expenseType === "fixed" ? "Fixo" : "Avulso", "", "Tipo"),
+        tableCell(statusPill(record.status), "", "Status"),
+        tableCell(formatCurrency(record.amountCents), "numeric card-value", "Valor")
       ]);
     }));
   }
@@ -1019,9 +1180,12 @@ function showView(view) {
     section.classList.toggle("active", active);
   });
   $$(".nav-item").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
+  $$(".mobile-nav-item[data-view]").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
+  dom.mobileMoreButton.classList.toggle("active", !["dashboard", "incomes", "expenses", "reports"].includes(view));
   const activeSection = $(`#view-${view}`);
   document.title = `${activeSection?.dataset.title || "Meu Controle"} · Meu Controle Financeiro`;
   closeMenu();
+  window.scrollTo({ top: 0, behavior: "auto" });
   if (view === "reports") renderReports();
   requestAnimationFrame(() => $("#conteudo").focus({ preventScroll: true }));
 }
@@ -1030,12 +1194,14 @@ function closeMenu() {
   dom.sidebar.classList.remove("open");
   dom.scrim.hidden = true;
   dom.menuButton.setAttribute("aria-expanded", "false");
+  dom.mobileMoreButton.classList.toggle("active", !["dashboard", "incomes", "expenses", "reports"].includes(state.view));
 }
 
 function openMenu() {
   dom.sidebar.classList.add("open");
   dom.scrim.hidden = false;
   dom.menuButton.setAttribute("aria-expanded", "true");
+  dom.mobileMoreButton.classList.add("active");
 }
 
 function setTheme(value) {
@@ -1080,7 +1246,10 @@ const EDITOR_SCHEMAS = {
         { name: "categoryId", label: "Categoria", type: "select", value: record.categoryId || "", options: currentCategoryOptions({ includeInactiveId: record.categoryId, kind: "expense" }), required: true },
         { name: "paymentMethodId", label: "Forma de pagamento", type: "select", value: record.paymentMethodId || "", options: currentPaymentOptions(record.paymentMethodId), required: true },
         { name: "status", label: "Status", type: "select", value: record.status || "paid", options: [{ value: "paid", label: "Pago" }, { value: "pending", label: "Pendente" }], required: true },
-        { name: "fundingAllocations", label: "Descontar de", type: "funding", value: allocationsFor(record), span: 2 },
+        {
+          name: "fundingAllocations", label: "Origem do dinheiro", type: "funding",
+          value: allocationsFor(record), defaultSalary: !record.id, span: 2
+        },
         { name: "notes", label: "Observação", type: "textarea", value: record.notes || "", span: 2, maxlength: 300 }
       ]
     };
@@ -1091,7 +1260,7 @@ const EDITOR_SCHEMAS = {
       ? template
       : template.every((allocation) => allocation.sourceMonth === state.month) ? template : [];
     return {
-      kind: "recurring", record, kicker: "Recorrência", title: record.id ? "Editar gasto fixo" : "Novo gasto fixo",
+      kind: "recurring", record, kicker: "Gasto fixo completo", title: record.id ? "Editar gasto fixo completo" : "Novo gasto fixo",
       fields: [
         { name: "description", label: "Descrição", type: "text", value: record.description || "", required: true, span: 2, maxlength: 80 },
         { name: "amount", label: "Valor", type: "money", value: record.amountCents, required: true },
@@ -1099,8 +1268,14 @@ const EDITOR_SCHEMAS = {
         { name: "categoryId", label: "Categoria", type: "select", value: record.categoryId || "", options: currentCategoryOptions({ includeInactiveId: record.categoryId, kind: "expense" }), required: true },
         { name: "paymentMethodId", label: "Forma de pagamento", type: "select", value: record.paymentMethodId || "", options: currentPaymentOptions(record.paymentMethodId), required: true },
         { name: "startDate", label: "Data inicial", type: "date", value: record.startDate || `${state.month}-01`, required: true },
-        { name: "endDate", label: "Data final (opcional)", type: "date", value: record.endDate || "" },
-        { name: "fundingAllocations", label: "Descontar de", type: "funding", value: applicableTemplate, span: 2, recurring: true },
+        {
+          name: "endDate", label: "Data final (opcional)", type: "date", value: record.endDate || "",
+          hint: "Este gasto será incluído até o mês desta data. A partir do mês seguinte, ele deixará de aparecer."
+        },
+        {
+          name: "fundingAllocations", label: "Origem do dinheiro", type: "funding",
+          value: applicableTemplate, defaultSalary: !record.id, span: 2, recurring: true
+        },
         { name: "active", label: "Recorrência ativa", type: "checkbox", value: record.id ? record.active : true, span: 2 },
         ...(record.id ? [{ name: "applyCurrent", label: "Aplicar valores também à ocorrência do mês selecionado", type: "checkbox", value: false, span: 2 }] : []),
         { name: "notes", label: "Observação", type: "textarea", value: record.notes || "", span: 2, maxlength: 300 }
@@ -1109,7 +1284,7 @@ const EDITOR_SCHEMAS = {
   },
   instance(record = {}) {
     return {
-      kind: "instance", record, kicker: "Somente este mês", title: "Editar ocorrência mensal",
+      kind: "instance", record, kicker: "Alteração mensal", title: "Editar somente este mês",
       fields: [
         { name: "description", label: "Descrição", type: "text", value: record.description || "", required: true, span: 2, maxlength: 80 },
         { name: "amount", label: "Valor", type: "money", value: record.amountCents, required: true },
@@ -1118,7 +1293,7 @@ const EDITOR_SCHEMAS = {
         { name: "paymentMethodId", label: "Forma de pagamento", type: "select", value: record.paymentMethodId, options: currentPaymentOptions(record.paymentMethodId), required: true },
         { name: "status", label: "Status", type: "select", value: record.status, options: [{ value: "paid", label: "Pago" }, { value: "pending", label: "Pendente" }], required: true },
         { name: "paidDate", label: "Data do pagamento", type: "date", value: record.paidDate || "" },
-        { name: "fundingAllocations", label: "Descontar de", type: "funding", value: allocationsFor(record), span: 2 },
+        { name: "fundingAllocations", label: "Origem do dinheiro", type: "funding", value: allocationsFor(record), span: 2 },
         { name: "notes", label: "Observação", type: "textarea", value: record.notes || "", span: 2, maxlength: 300 }
       ]
     };
@@ -1163,15 +1338,19 @@ const EDITOR_SCHEMAS = {
   }
 };
 
-function fundingModeFor(allocations) {
-  if (!allocations.length) return "unassigned";
+function fundingModeFor(allocations, defaultSalary = false) {
+  if (!allocations.length) return defaultSalary ? "salary" : "unassigned";
   if (allocations.length === 1) return allocationSourceValue(allocations[0]);
   return "split";
 }
 
 function fundingOptionLabel(source) {
+  if (source.sourceType === "salary" && source.missingSalary) {
+    return "Salário principal — padrão · ainda não definido";
+  }
   const available = formatCurrency(source.availableCents);
-  return `${source.label} · disponível ${available}${source.missing ? " · removida" : ""}`;
+  const prefix = source.sourceType === "salary" ? "Salário principal — padrão" : source.label;
+  return `${prefix} · disponível ${available}${source.missing ? " · removida" : ""}`;
 }
 
 function fundingSourceSelect(selectedValue = "") {
@@ -1223,27 +1402,39 @@ function fundingControl(field) {
   const wrapper = createElement("div", { className: "funding-editor", id: "editor-funding-control" });
   const mode = createElement("select", { id: "editor-funding-mode", name: "fundingMode" });
   replaceChildren(mode, [
-    createElement("option", { value: "unassigned", text: "Sem origem definida" }),
     ...state.editorFundingSources.map((source) => createElement("option", {
       value: source.value, text: fundingOptionLabel(source)
     })),
-    createElement("option", { value: "split", text: "Dividir entre várias rendas" })
+    createElement("option", { value: "split", text: "Dividir entre várias rendas" }),
+    createElement("option", { value: "unassigned", text: "Não descontar de nenhuma renda (avançado)" })
   ]);
-  mode.value = fundingModeFor(allocations);
+  mode.value = fundingModeFor(allocations, field.defaultSalary);
   const split = createElement("div", { className: "funding-split", id: "editor-funding-split" });
+  const selectionInfo = createElement("small", { className: "funding-selection-info" });
+  const updateSelectionInfo = () => {
+    const selectedSource = state.editorFundingSources.find((source) => source.value === mode.value);
+    selectionInfo.textContent = selectedSource
+      ? `Selecionado: ${fundingOptionLabel(selectedSource)}.`
+      : mode.value === "split"
+        ? "Informe abaixo o valor exato usado de cada renda."
+        : "Este gasto aparecerá separado das rendas nas estatísticas.";
+  };
   split.hidden = mode.value !== "split";
   if (!split.hidden) renderFundingSplit(split, allocations);
   mode.addEventListener("change", () => {
     split.hidden = mode.value !== "split";
     if (!split.hidden && !split.querySelector(".funding-row")) renderFundingSplit(split);
     state.editorFundingWarningConfirmed = false;
+    state.editorUnassignedWarningConfirmed = false;
+    updateSelectionInfo();
   });
   const hint = createElement("small", {
     text: field.recurring
-      ? "Quando usar somente o salário, a escolha será repetida nos próximos meses. Receitas adicionais e divisões valem apenas para a ocorrência do mês selecionado."
-      : "Você pode usar uma única renda ou dividir o valor exato do gasto entre várias."
+      ? "O salário principal é o padrão e será repetido nos próximos meses. Receitas adicionais e divisões valem apenas para a ocorrência do mês selecionado."
+      : "O salário principal é usado por padrão. Você também pode escolher uma receita adicional ou dividir o valor exato entre várias rendas."
   });
-  wrapper.append(mode, split, hint);
+  updateSelectionInfo();
+  wrapper.append(mode, selectionInfo, split, hint);
   return wrapper;
 }
 
@@ -1288,6 +1479,7 @@ async function openEditor(schema) {
     state.editorFundingSources = await fundingSourcesFor(profileId, sourceMonth, schema.record);
     state.editorFundingMonth = sourceMonth;
     state.editorFundingWarningConfirmed = false;
+    state.editorUnassignedWarningConfirmed = false;
   } else {
     state.editorFundingSources = [];
   }
@@ -1304,7 +1496,8 @@ async function openEditor(schema) {
     }
     return createElement("div", { className: `field ${field.span === 2 ? "span-2" : ""}` }, [
       createElement("label", { for: field.type === "funding" ? "editor-funding-mode" : control.id, text: `${field.label}${field.required ? " *" : ""}` }),
-      control
+      control,
+      ...(field.hint ? [createElement("small", { text: field.hint })] : [])
     ]);
   }));
   dom.editorDialog.showModal();
@@ -1312,7 +1505,7 @@ async function openEditor(schema) {
 }
 
 function readFundingAllocations(amountCents) {
-  const mode = $("#editor-funding-mode", dom.editorFields)?.value || "unassigned";
+  const mode = $("#editor-funding-mode", dom.editorFields)?.value || "salary";
   if (mode === "unassigned") return [];
   if (mode !== "split") return [allocationFromSourceValue(mode, amountCents, state.editorFundingMonth)];
   const allocations = $$(".funding-row", dom.editorFields).map((row) => {
@@ -1338,6 +1531,7 @@ function editorValues() {
   });
   if (state.editor.fields.some((field) => field.type === "funding")) {
     values.fundingAllocations = readFundingAllocations(values.amount);
+    values.fundingUnassignedExplicit = $("#editor-funding-mode", dom.editorFields)?.value === "unassigned";
   }
   return values;
 }
@@ -1352,7 +1546,7 @@ function validateEditor(values) {
   if (kind === "recurring" && values.dueDay !== null && (!Number.isInteger(values.dueDay) || values.dueDay < 1 || values.dueDay > 31)) throw new Error("Quando informado, o vencimento deve ficar entre os dias 1 e 31.");
   if (Array.isArray(values.fundingAllocations) && values.fundingAllocations.length) {
     const allocationTotal = sumCents(values.fundingAllocations);
-    if (allocationTotal !== values.amount) {
+    if (!fundingMatchesAmount(values.fundingAllocations, values.amount)) {
       throw new Error(`A divisão precisa somar exatamente ${formatCurrency(values.amount)}. No momento, soma ${formatCurrency(allocationTotal)}.`);
     }
     const sources = values.fundingAllocations.map(allocationSourceValue);
@@ -1379,6 +1573,9 @@ function fundingOverageMessage(values) {
   if (!Array.isArray(values.fundingAllocations) || !values.fundingAllocations.length) return "";
   return values.fundingAllocations.flatMap((allocation) => {
     const source = state.editorFundingSources.find((item) => item.value === allocationSourceValue(allocation));
+    if (source?.sourceType === "salary" && source.missingSalary) {
+      return [`o salário de ${monthLabel(state.editorFundingMonth)} ainda não foi definido; o gasto ficará vinculado ao salário e o saldo aparecerá negativo até o valor ser informado`];
+    }
     const available = source?.availableCents || 0;
     if (allocation.amountCents <= available) return [];
     return [`${source?.label || fundingSourceLabel(allocation)} será ultrapassada em ${formatCurrency(allocation.amountCents - available)}`];
@@ -1397,13 +1594,16 @@ async function saveEditor(values) {
       ...base, description: values.description, amountCents: values.amount, date: values.date,
       month: monthFromDate(values.date), categoryId: values.categoryId,
       paymentMethodId: values.paymentMethodId, status: values.status,
-      fundingAllocations: values.fundingAllocations, notes: values.notes
+      fundingAllocations: values.fundingAllocations,
+      fundingUnassignedExplicit: values.fundingUnassignedExplicit,
+      notes: values.notes
     });
   } else if (kind === "recurring") {
     const saved = await putRecord("recurringExpenses", {
       ...base, description: values.description, amountCents: values.amount, dueDay: values.dueDay,
       categoryId: values.categoryId, paymentMethodId: values.paymentMethodId, startDate: values.startDate,
       endDate: values.endDate || null, fundingTemplate: values.fundingAllocations,
+      fundingUnassignedExplicit: values.fundingUnassignedExplicit,
       active: values.active, notes: values.notes
     });
     if (values.applyCurrent && record.id) {
@@ -1413,16 +1613,20 @@ async function saveEditor(values) {
           ...instance, description: saved.description, amountCents: saved.amountCents, categoryId: saved.categoryId,
           paymentMethodId: saved.paymentMethodId, dueDay: saved.dueDay,
           date: saved.dueDay ? dateForMonthAndDay(state.month, saved.dueDay) : null,
-          fundingAllocations: values.fundingAllocations, notes: saved.notes
+          fundingAllocations: values.fundingAllocations,
+          fundingUnassignedExplicit: values.fundingUnassignedExplicit,
+          notes: saved.notes
         });
       }
     }
+    await synchronizeRecurringOccurrences(saved, state.month);
   } else if (kind === "instance") {
     await putRecord("monthlyExpenseInstances", {
       ...base, description: values.description, amountCents: values.amount, date: values.date,
       dueDay: values.date ? Number(values.date.slice(-2)) : null,
       categoryId: values.categoryId, paymentMethodId: values.paymentMethodId, status: values.status,
-      paidDate: values.paidDate || null, fundingAllocations: values.fundingAllocations, notes: values.notes
+      paidDate: values.paidDate || null, fundingAllocations: values.fundingAllocations,
+      fundingUnassignedExplicit: values.fundingUnassignedExplicit, notes: values.notes
     });
   } else if (kind === "category") {
     await putRecord("categories", { ...base, name: values.name, icon: values.icon, color: values.color, kind: values.kind, active: values.active });
@@ -1522,7 +1726,8 @@ async function handleAction(action, id) {
       await putRecord("monthlyExpenseInstances", { ...record, status: paid ? "paid" : "pending", paidDate: paid ? currentLocalDate() : null });
     } else if (action === "toggle-recurring") {
       const record = await getRecord("recurringExpenses", id);
-      await putRecord("recurringExpenses", { ...record, active: !record.active });
+      const saved = await putRecord("recurringExpenses", { ...record, active: !record.active });
+      await synchronizeRecurringOccurrences(saved, state.month);
     } else if (action === "toggle-category") {
       const record = await getRecord("categories", id);
       await putRecord("categories", { ...record, active: !record.active });
@@ -1644,7 +1849,7 @@ async function loadDemo() {
     recurring: [
       { id: `demo-rec-rent-${state.activeProfileId}`, profileId: state.activeProfileId, description: "Aluguel", amountCents: 100000, categoryId: category("Moradia"), paymentMethodId: payment("Pix"), dueDay: 5, startDate: `${state.month}-01`, endDate: null, fundingTemplate: salaryFunding(100000), active: true, notes: "Dado de demonstração", origin: "demo", createdAt: timestamp, updatedAt: timestamp, version: 1 },
       { id: `demo-rec-internet-${state.activeProfileId}`, profileId: state.activeProfileId, description: "Internet", amountCents: 10000, categoryId: category("Assinaturas"), paymentMethodId: payment("Débito automático"), dueDay: 12, startDate: `${state.month}-01`, endDate: null, fundingTemplate: salaryFunding(10000), active: true, notes: "Dado de demonstração", origin: "demo", createdAt: timestamp, updatedAt: timestamp, version: 1 },
-      { id: `demo-rec-energy-${state.activeProfileId}`, profileId: state.activeProfileId, description: "Energia", amountCents: 25000, categoryId: category("Moradia"), paymentMethodId: payment("Boleto"), dueDay: 18, startDate: `${state.month}-01`, endDate: null, fundingTemplate: [], active: true, notes: "Dado de demonstração", origin: "demo", createdAt: timestamp, updatedAt: timestamp, version: 1 }
+      { id: `demo-rec-energy-${state.activeProfileId}`, profileId: state.activeProfileId, description: "Energia", amountCents: 25000, categoryId: category("Moradia"), paymentMethodId: payment("Boleto"), dueDay: 18, startDate: `${state.month}-01`, endDate: null, fundingTemplate: salaryFunding(25000), active: true, notes: "Dado de demonstração", origin: "demo", createdAt: timestamp, updatedAt: timestamp, version: 1 }
     ],
     expenses: [
       { id: `demo-food-${state.activeProfileId}-${state.month}`, profileId: state.activeProfileId, month: state.month, description: "Alimentação do mês", amountCents: 50000, categoryId: category("Alimentação"), paymentMethodId: payment("Cartão de débito"), date: `${state.month}-08`, status: "paid", fundingAllocations: [...salaryFunding(30000), ...extraFunding(20000)], notes: "Dado de demonstração", origin: "demo", createdAt: timestamp, updatedAt: timestamp, version: 1 },
@@ -1813,7 +2018,12 @@ function bindEvents() {
     if (viewLink) showView(viewLink.dataset.viewLink);
   });
   dom.menuButton.addEventListener("click", () => dom.sidebar.classList.contains("open") ? closeMenu() : openMenu());
+  dom.mobileMoreButton.addEventListener("click", () => dom.sidebar.classList.contains("open") ? closeMenu() : openMenu());
   dom.scrim.addEventListener("click", closeMenu);
+  dom.reportFilterToggle.addEventListener("click", () => {
+    const open = dom.reportFilterPanel.classList.toggle("open");
+    dom.reportFilterToggle.setAttribute("aria-expanded", String(open));
+  });
   dom.profilePicker.addEventListener("change", async () => {
     state.activeProfileId = dom.profilePicker.value;
     localStorage.setItem(ACTIVE_PROFILE_KEY, state.activeProfileId);
@@ -1855,6 +2065,7 @@ function bindEvents() {
     dom.reportStart.value = "";
     dom.reportEnd.value = "";
     renderReportFilterOptions();
+    updateReportFilterCount();
     updateReport();
   });
   dom.saveReportPreset.addEventListener("click", saveReportPreset);
@@ -1880,7 +2091,10 @@ function bindEvents() {
       try { event.target.value = formatMoneyInput(parseMoneyToCents(event.target.value)); } catch { /* validation happens on submit */ }
     }
   }, true);
-  dom.editorFields.addEventListener("input", () => { state.editorFundingWarningConfirmed = false; });
+  dom.editorFields.addEventListener("input", () => {
+    state.editorFundingWarningConfirmed = false;
+    state.editorUnassignedWarningConfirmed = false;
+  });
   dom.editorFields.addEventListener("change", async (event) => {
     const changesExpenseMonth = event.target.id === "editor-date" && state.editor?.kind === "expense";
     const changesNewRecurringMonth = event.target.id === "editor-startDate" && state.editor?.kind === "recurring" && !state.editor.record.id;
@@ -1894,17 +2108,22 @@ function bindEvents() {
     );
     state.editorFundingMonth = nextMonth;
     const field = state.editor.fields.find((item) => item.type === "funding");
-    $("#editor-funding-control", dom.editorFields)?.replaceWith(fundingControl({ ...field, value: [] }));
-    toast("A origem da renda foi limpa porque o gasto mudou de mês.");
+    $("#editor-funding-control", dom.editorFields)?.replaceWith(fundingControl({ ...field, value: [], defaultSalary: true }));
+    toast("A origem do dinheiro foi atualizada para o salário do novo mês.");
   });
   dom.editorForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (event.submitter?.value === "cancel") { dom.editorDialog.close(); return; }
     dom.editorSubmit.disabled = true;
+    dom.editorSubmit.textContent = "Salvando…";
     dom.editorError.hidden = true;
     try {
       const values = editorValues();
       validateEditor(values);
+      if (values.fundingUnassignedExplicit && !state.editorUnassignedWarningConfirmed) {
+        state.editorUnassignedWarningConfirmed = true;
+        throw new Error("Este gasto não será descontado de nenhuma renda e aparecerá separadamente nas estatísticas. Se for intencional, clique em Salvar novamente.");
+      }
       const overage = fundingOverageMessage(values);
       if (overage && !state.editorFundingWarningConfirmed) {
         state.editorFundingWarningConfirmed = true;
@@ -1919,6 +2138,7 @@ function bindEvents() {
       dom.editorError.hidden = false;
     } finally {
       dom.editorSubmit.disabled = false;
+      dom.editorSubmit.textContent = "Salvar";
     }
   });
   dom.confirmForm.addEventListener("submit", (event) => {
@@ -2002,6 +2222,7 @@ function bindEvents() {
 function mapDom() {
   Object.assign(dom, {
     sidebar: $("#sidebar"), menuButton: $("#menu-button"), scrim: $("#scrim"),
+    mobileMoreButton: $("#mobile-more-button"),
     profilePicker: $("#profile-picker"),
     monthPicker: $("#month-picker"), previousMonth: $("#previous-month"), nextMonth: $("#next-month"),
     dashboardMonthLabel: $("#dashboard-month-label"), balanceBanner: $("#balance-banner"),
@@ -2019,6 +2240,8 @@ function mapDom() {
     expenseTableBody: $("#expense-table-body"), expenseEmpty: $("#expense-empty"), clearExpenseFilters: $("#clear-expense-filters"),
     categoryList: $("#category-list"), paymentList: $("#payment-list"), profileList: $("#profile-list"),
     reportFilters: $("#report-filters"), reportPeriod: $("#report-period"), reportProfile: $("#report-profile"),
+    reportFilterToggle: $("#report-filter-toggle"), reportFilterPanel: $("#report-filter-panel"),
+    reportActiveFilterCount: $("#report-active-filter-count"),
     reportCategory: $("#report-category"), reportPayment: $("#report-payment"), reportStart: $("#report-start"), reportEnd: $("#report-end"),
     reportFundingSource: $("#report-funding-source"),
     clearReportFilters: $("#clear-report-filters"), reportPreset: $("#report-preset"),
@@ -2047,21 +2270,33 @@ function mapDom() {
     storageStatus: $("#storage-status"), persistStorageButton: $("#persist-storage-button"),
     loadDemoButton: $("#load-demo-button"), removeDemoButton: $("#remove-demo-button"), deleteAllButton: $("#delete-all-button"),
     toastRegion: $("#toast-region"), updateBanner: $("#update-banner"), updateButton: $("#update-button"),
-    offlineIndicator: $("#offline-indicator"), installButton: $("#install-button")
+    offlineIndicator: $("#offline-indicator"), installButton: $("#install-button"),
+    loadingIndicator: $("#loading-indicator"),
+    dashboardMoreMetrics: $("#dashboard-more-metrics"), dashboardSalaryUse: $("#dashboard-salary-use"),
+    dashboardOtherUse: $("#dashboard-other-use"), dashboardIncomeUsage: $("#dashboard-income-usage")
   });
 }
 
 async function initialize() {
   mapDom();
+  if ("scrollRestoration" in history) history.scrollRestoration = "manual";
+  window.scrollTo({ top: 0, behavior: "auto" });
   const savedTheme = localStorage.getItem("finance-theme") || "system";
   setTheme(savedTheme);
   dom.monthPicker.value = state.month;
   bindEvents();
+  state.chartObserver = observeChartContainers(() => {
+    if (!state.metrics) return;
+    if (state.view === "dashboard") renderDashboard();
+    if (state.view === "reports") renderReports();
+  });
   try {
     await seedDefaults();
+    await synchronizeAllRecurringOccurrences(state.month);
     await loadMonth();
     await updateStorageStatus();
     await registerServiceWorker();
+    window.scrollTo({ top: 0, behavior: "auto" });
   } catch (error) {
     console.error(error);
     toast(`Não foi possível iniciar o aplicativo: ${error.message}`, "error");

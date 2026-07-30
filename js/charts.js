@@ -3,14 +3,38 @@ const FALLBACK_COLORS = ["#0f766e", "#dc7d30", "#4472c4", "#8b5fc7", "#d14f63", 
 function setupCanvas(canvas) {
   const ratio = Math.max(1, Math.min(window.devicePixelRatio || 1, 2));
   const rect = canvas.getBoundingClientRect();
-  const width = Math.max(280, Math.round(rect.width || canvas.parentElement?.clientWidth || 500));
-  const height = Number(canvas.getAttribute("height")) || 280;
+  const width = Math.max(220, Math.round(rect.width || canvas.parentElement?.clientWidth || 500));
+  const requestedHeight = Number(canvas.getAttribute("height")) || 280;
+  const height = width < 480 ? Math.min(requestedHeight, 260) : requestedHeight;
   canvas.width = Math.round(width * ratio);
   canvas.height = Math.round(height * ratio);
   canvas.style.height = `${height}px`;
   const context = canvas.getContext("2d");
   context.setTransform(ratio, 0, 0, ratio, 0, 0);
   return { context, width, height };
+}
+
+function renderLegend(canvas, entries) {
+  let legend = canvas.nextElementSibling?.classList.contains("chart-legend")
+    ? canvas.nextElementSibling
+    : null;
+  if (!legend) {
+    legend = document.createElement("div");
+    legend.className = "chart-legend";
+    canvas.insertAdjacentElement("afterend", legend);
+  }
+  legend.replaceChildren(...entries.slice(0, 8).map((entry, index) => {
+    const item = document.createElement("span");
+    item.className = "legend-item";
+    const swatch = document.createElement("span");
+    swatch.className = "legend-swatch";
+    swatch.style.background = entry.color || FALLBACK_COLORS[index % FALLBACK_COLORS.length];
+    const label = document.createElement("span");
+    label.textContent = String(entry.label);
+    item.append(swatch, label);
+    return item;
+  }));
+  legend.hidden = entries.length === 0;
 }
 
 function themeColors() {
@@ -35,12 +59,13 @@ function emptyChart(context, width, height, message = "Sem dados para exibir") {
 export function drawDonut(canvas, entries) {
   const { context, width, height } = setupCanvas(canvas);
   const validEntries = entries.filter((entry) => entry.value > 0);
+  renderLegend(canvas, validEntries);
   if (!validEntries.length) return emptyChart(context, width, height);
   const colors = themeColors();
   const total = validEntries.reduce((sum, entry) => sum + entry.value, 0);
-  const centerX = Math.min(width * 0.35, 170);
+  const centerX = width / 2;
   const centerY = height / 2;
-  const radius = Math.min(centerX - 18, height * 0.32);
+  const radius = Math.min(width * 0.28, height * 0.32);
   let angle = -Math.PI / 2;
   context.clearRect(0, 0, width, height);
   validEntries.forEach((entry, index) => {
@@ -58,27 +83,13 @@ export function drawDonut(canvas, entries) {
   context.fillText(`${Math.round(total / 100).toLocaleString("pt-BR")}`, centerX, centerY - 2);
   context.fillStyle = colors.muted;
   context.font = "11px system-ui";
-  context.fillText("reais em despesas", centerX, centerY + 17);
-
-  const legendX = Math.max(centerX * 2 + 20, width * 0.58);
-  const maxLegend = Math.min(validEntries.length, 6);
-  validEntries.slice(0, maxLegend).forEach((entry, index) => {
-    const y = 35 + index * 34;
-    context.fillStyle = entry.color || FALLBACK_COLORS[index % FALLBACK_COLORS.length];
-    context.fillRect(legendX, y - 8, 10, 10);
-    context.fillStyle = colors.text;
-    context.textAlign = "left";
-    context.font = "600 11px system-ui";
-    context.fillText(String(entry.label).slice(0, 18), legendX + 17, y);
-    context.fillStyle = colors.muted;
-    context.font = "10px system-ui";
-    context.fillText(`${Math.round((entry.value / total) * 100)}%`, legendX + 17, y + 14);
-  });
+  context.fillText("reais no total", centerX, centerY + 17);
 }
 
 export function drawBars(canvas, entries) {
   const { context, width, height } = setupCanvas(canvas);
   const validEntries = entries.filter((entry) => Number.isFinite(entry.value));
+  renderLegend(canvas, validEntries);
   if (!validEntries.length || validEntries.every((entry) => entry.value === 0)) return emptyChart(context, width, height);
   const colors = themeColors();
   const padding = { top: 25, right: 20, bottom: 52, left: 52 };
@@ -117,6 +128,7 @@ export function drawBars(canvas, entries) {
 
 export function drawLine(canvas, entries) {
   const { context, width, height } = setupCanvas(canvas);
+  renderLegend(canvas, []);
   if (!entries.length) return emptyChart(context, width, height);
   const colors = themeColors();
   const padding = { top: 28, right: 22, bottom: 48, left: 24 };
@@ -158,4 +170,23 @@ export function drawLine(canvas, entries) {
     context.textAlign = "center";
     context.fillText(entry.label, x, height - 24);
   });
+}
+
+export function observeChartContainers(callback) {
+  if (!("ResizeObserver" in window)) return null;
+  let timer;
+  const widths = new WeakMap();
+  const observer = new ResizeObserver((entries) => {
+    const changed = entries.some((entry) => {
+      const width = Math.round(entry.contentRect.width);
+      if (widths.get(entry.target) === width) return false;
+      widths.set(entry.target, width);
+      return true;
+    });
+    if (!changed) return;
+    clearTimeout(timer);
+    timer = setTimeout(callback, 120);
+  });
+  document.querySelectorAll(".chart-panel").forEach((panel) => observer.observe(panel));
+  return observer;
 }

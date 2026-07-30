@@ -1,5 +1,6 @@
 import { BACKUP_VERSION, downloadBlob, formatCurrency, formatDate, localBackupDate, monthFromDate, nowIso } from "./utils.js";
 import { DEFAULT_PROFILE_ID, STORES, exportDatabase, importDatabase } from "./database.js";
+import { normalizeExpenseFunding, normalizeRecurringFunding } from "./funding.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -84,7 +85,7 @@ export function validateBackup(backup) {
   const errors = [];
   if (!backup || typeof backup !== "object") errors.push("O conteúdo não é um objeto JSON.");
   if (backup?.format !== "controle-financeiro") errors.push("O arquivo não pertence a este aplicativo.");
-  if (![1, 2, BACKUP_VERSION].includes(backup?.formatVersion)) errors.push(`A versão ${backup?.formatVersion ?? "desconhecida"} não é compatível com a versão ${BACKUP_VERSION}.`);
+  if (![1, 2, 3, BACKUP_VERSION].includes(backup?.formatVersion)) errors.push(`A versão ${backup?.formatVersion ?? "desconhecida"} não é compatível com a versão ${BACKUP_VERSION}.`);
   if (!backup?.data || typeof backup.data !== "object") errors.push("A seção de dados está ausente.");
   for (const store of STORES) {
     if (store === "profiles" && backup?.formatVersion === 1) continue;
@@ -110,15 +111,9 @@ export function normalizeBackup(backup) {
   PROFILE_STORES.forEach((store) => {
     data[store] = data[store].map((record) => ({ ...record, profileId: record.profileId || DEFAULT_PROFILE_ID }));
   });
-  data.oneTimeExpenses = data.oneTimeExpenses.map((record) => ({
-    ...record, fundingAllocations: Array.isArray(record.fundingAllocations) ? record.fundingAllocations : []
-  }));
-  data.monthlyExpenseInstances = data.monthlyExpenseInstances.map((record) => ({
-    ...record, fundingAllocations: Array.isArray(record.fundingAllocations) ? record.fundingAllocations : []
-  }));
-  data.recurringExpenses = data.recurringExpenses.map((record) => ({
-    ...record, fundingTemplate: Array.isArray(record.fundingTemplate) ? record.fundingTemplate : []
-  }));
+  data.oneTimeExpenses = data.oneTimeExpenses.map((record) => normalizeExpenseFunding(record));
+  data.monthlyExpenseInstances = data.monthlyExpenseInstances.map((record) => normalizeExpenseFunding(record));
+  data.recurringExpenses = data.recurringExpenses.map((record) => normalizeRecurringFunding(record));
   return { ...backup, formatVersion: BACKUP_VERSION, migratedFromVersion: backup.formatVersion, data };
 }
 
@@ -162,10 +157,10 @@ function csvEscape(value) {
 
 function fundingText(record, incomeNames) {
   const allocations = Array.isArray(record.fundingAllocations) ? record.fundingAllocations : [];
-  if (!allocations.length) return "Sem origem definida";
+  if (!allocations.length) return "Não descontado de nenhuma renda";
   return allocations.map((allocation) => {
     const label = allocation.sourceType === "salary"
-      ? "Salário"
+      ? "Salário principal"
       : incomeNames.get(allocation.sourceId) || allocation.sourceLabel || "Receita removida";
     return `${label}: ${formatCurrency(allocation.amountCents).replace(/\s/g, " ")}`;
   }).join(" | ");

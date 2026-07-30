@@ -1,4 +1,4 @@
-const CACHE_VERSION = "controle-financeiro-v3.0.0";
+const CACHE_VERSION = "controle-financeiro-v4.0.0";
 const APP_ROOT = new URL("./", self.registration.scope);
 const INDEX_URL = new URL("./index.html", APP_ROOT).href;
 const APP_SHELL = [
@@ -9,6 +9,7 @@ const APP_SHELL = [
   "./js/app.js",
   "./js/utils.js",
   "./js/calculations.js",
+  "./js/funding.js",
   "./js/database.js",
   "./js/recurring.js",
   "./js/charts.js",

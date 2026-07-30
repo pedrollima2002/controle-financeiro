@@ -87,7 +87,22 @@
             <strong class="status-value" id="balance-value">R$ 0,00</strong>
           </div>
 
-          <div class="metric-grid" id="dashboard-metrics" aria-label="Indicadores do mês"></div>
+          <div class="metric-grid dashboard-primary-metrics" id="dashboard-metrics" aria-label="Principais indicadores do mês"></div>
+          <details class="more-indicators">
+            <summary>Ver mais indicadores</summary>
+            <div class="metric-grid" id="dashboard-more-metrics" aria-label="Indicadores complementares do mês"></div>
+          </details>
+          <div class="funding-use-grid">
+            <article class="panel funding-use-panel">
+              <div class="panel-heading"><div><span class="panel-kicker">Origem principal</span><h2>Uso do salário</h2></div></div>
+              <div class="funding-use-metrics" id="dashboard-salary-use"></div>
+            </article>
+            <article class="panel funding-use-panel">
+              <div class="panel-heading"><div><span class="panel-kicker">Entradas complementares</span><h2>Uso das outras receitas</h2></div></div>
+              <div class="funding-use-metrics" id="dashboard-other-use"></div>
+              <div class="income-usage-list" id="dashboard-income-usage"></div>
+            </article>
+          </div>
           <div class="dashboard-notices" id="dashboard-notices">
             <article class="panel notice-panel" id="backup-reminder" hidden>
               <div><strong>Seu backup está pendente</strong><span id="backup-reminder-text"></span></div>
@@ -186,7 +201,7 @@
             <div class="table-wrap">
               <table>
                 <caption class="sr-only">Regras de gastos recorrentes</caption>
-                <thead><tr><th>Descrição</th><th>Vencimento</th><th>Categoria</th><th>Origem futura</th><th>Situação</th><th class="numeric">Valor</th><th><span class="sr-only">Ações</span></th></tr></thead>
+                <thead><tr><th>Descrição</th><th>Vencimento</th><th>Período</th><th>Categoria</th><th>Origem futura</th><th>Situação</th><th class="numeric">Valor</th><th><span class="sr-only">Ações</span></th></tr></thead>
                 <tbody id="recurring-table-body"></tbody>
               </table>
             </div>
@@ -258,6 +273,10 @@
               <p>Gráficos nativos, acompanhados de resumos em texto.</p>
             </div>
           </div>
+          <button class="button secondary mobile-only report-filter-toggle" id="report-filter-toggle" type="button" aria-expanded="false" aria-controls="report-filter-panel">
+            Filtros <span id="report-active-filter-count">0 ativos</span>
+          </button>
+          <div class="report-filter-panel" id="report-filter-panel">
           <form class="filter-bar report-filters" id="report-filters">
             <div class="field"><label for="report-period">Período</label><select id="report-period" name="period"><option value="month">Mês selecionado</option><option value="3">Últimos 3 meses</option><option value="6">Últimos 6 meses</option><option value="12">Últimos 12 meses</option><option value="all">Todo o histórico</option><option value="custom">Personalizado</option></select></div>
             <div class="field"><label for="report-profile">Perfil</label><select id="report-profile" name="profileId"></select></div>
@@ -265,13 +284,14 @@
             <div class="field"><label for="report-payment">Pagamento</label><select id="report-payment" name="paymentMethodId"></select></div>
             <div class="field"><label for="report-type">Tipo</label><select id="report-type" name="expenseType"><option value="">Fixos e avulsos</option><option value="fixed">Somente fixos</option><option value="oneTime">Somente avulsos</option></select></div>
             <div class="field"><label for="report-status">Status</label><select id="report-status" name="status"><option value="">Pagos e pendentes</option><option value="paid">Pagos</option><option value="pending">Pendentes</option></select></div>
-            <div class="field"><label for="report-funding-type">Uso da renda</label><select id="report-funding-type" name="fundingType"><option value="">Todas as origens</option><option value="salary">Usou salário</option><option value="additional">Usou receita adicional</option><option value="mixed">Dividido entre rendas</option><option value="funded">Com origem definida</option><option value="unassigned">Sem origem definida</option></select></div>
+            <div class="field"><label for="report-funding-type">Uso da renda</label><select id="report-funding-type" name="fundingType"><option value="">Todos os gastos</option><option value="salary">Gastos do salário</option><option value="additional">Gastos de receitas adicionais</option><option value="mixed">Gastos divididos</option><option value="funded">Com origem definida</option><option value="unassigned">Sem vínculo explícito</option></select></div>
             <div class="field"><label for="report-funding-source">Renda específica</label><select id="report-funding-source" name="fundingSource"></select></div>
             <div class="field search-field"><label for="report-search">Descrição</label><input id="report-search" name="search" type="search" placeholder="Pesquisar"></div>
             <div class="field report-custom-date" hidden><label for="report-start">De</label><input id="report-start" name="startDate" type="date"></div>
             <div class="field report-custom-date" hidden><label for="report-end">Até</label><input id="report-end" name="endDate" type="date"></div>
             <button class="button ghost filter-reset" id="clear-report-filters" type="button">Limpar</button>
           </form>
+          </div>
           <div class="report-tools">
             <div class="field preset-field"><label for="report-preset">Filtro salvo</label><select id="report-preset"><option value="">Nenhum</option></select></div>
             <button class="button secondary compact" id="save-report-preset" type="button">Salvar filtro</button>
@@ -470,6 +490,14 @@
     </div>
   </div>
 
+  <nav class="mobile-bottom-nav" id="mobile-bottom-nav" aria-label="Navegação principal no celular">
+    <button class="mobile-nav-item active" data-view="dashboard" type="button"><span aria-hidden="true">⌂</span><small>Resumo</small></button>
+    <button class="mobile-nav-item" data-view="incomes" type="button"><span aria-hidden="true">↗</span><small>Entradas</small></button>
+    <button class="mobile-nav-item" data-view="expenses" type="button"><span aria-hidden="true">↘</span><small>Gastos</small></button>
+    <button class="mobile-nav-item" data-view="reports" type="button"><span aria-hidden="true">▥</span><small>Relatórios</small></button>
+    <button class="mobile-nav-item" id="mobile-more-button" type="button"><span aria-hidden="true">•••</span><small>Mais</small></button>
+  </nav>
+
   <dialog id="editor-dialog" class="modal">
     <form method="dialog" id="editor-form">
       <div class="modal-heading">
@@ -521,6 +549,7 @@
     <button class="button compact primary" id="update-button" type="button">Atualizar agora</button>
   </div>
   <div class="offline-indicator" id="offline-indicator" hidden>Modo offline</div>
+  <div class="loading-indicator" id="loading-indicator" role="status" hidden><span aria-hidden="true"></span> Atualizando dados…</div>
   <div class="scrim" id="scrim" hidden></div>
 
   <script type="module" src="./js/app.js"></script>

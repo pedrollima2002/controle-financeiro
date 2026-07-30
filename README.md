@@ -6,14 +6,14 @@ Aplicação web estática de controle financeiro pessoal. Funciona sem conta, ba
 
 - dashboard mensal com saldos previsto e realizado;
 - salário mensal, receitas extras e status recebido/pendente;
-- gastos fixos recorrentes com ocorrências independentes por mês;
+- gastos fixos recorrentes com ocorrências independentes por mês, período inclusivo e encerramento seguro;
 - vencimento opcional em gastos fixos, com destaque para pendências sem data;
 - gastos avulsos com pesquisa, período, filtros, ordenação e duplicação;
 - múltiplos perfis financeiros locais, sem login, com troca imediata e visão consolidada;
 - categorias e formas de pagamento personalizáveis;
 - histórico por seletor de mês;
 - relatórios detalhados com filtros combináveis por período, perfil, categoria, pagamento, tipo, status e descrição;
-- escolha da renda usada por cada gasto: salário, receita adicional ou divisão entre várias rendas;
+- salário principal como origem padrão de novos gastos, com opção de receita adicional, divisão ou ausência explícita de vínculo;
 - saldo utilizado e disponível de cada renda, com aviso quando o valor é ultrapassado;
 - relatórios separados para salário, receitas adicionais e visão consolidada de todas as rendas;
 - filtros de relatório salvos no navegador, totais filtrados e exportação do resultado em CSV;
@@ -24,7 +24,7 @@ Aplicação web estática de controle financeiro pessoal. Funciona sem conta, ba
 - modo claro, escuro e automático;
 - PWA instalável e funcionamento offline após o primeiro acesso;
 - dados de demonstração opcionais e removíveis;
-- interface em português do Brasil, responsiva e acessível.
+- interface em português do Brasil, responsiva e acessível, com navegação inferior e tabelas em cards no celular.
 
 ## Privacidade
 
@@ -52,6 +52,7 @@ controle-financeiro/
 │   ├── charts.js
 │   ├── database.js
 │   ├── export.js
+│   ├── funding.js
 │   ├── recurring.js
 │   └── utils.js
 └── tests/
@@ -62,7 +63,7 @@ controle-financeiro/
 
 ## Modelo de dados
 
-O banco `meu-controle-financeiro` usa IndexedDB, versão 3. As atualizações anteriores são automáticas: registros da versão 1 recebem o perfil **Pessoal** e gastos criados antes da versão 3 ficam como **Sem origem definida**. Nenhum lançamento é apagado. Cada store tem chave primária `id`; os lançamentos incluem `profileId`, `createdAt`, `updatedAt`, `version` e `origin` quando aplicável.
+O banco `meu-controle-financeiro` usa IndexedDB, versão 4. As atualizações anteriores são automáticas: registros da versão 1 recebem o perfil **Pessoal** e gastos sem uma origem válida passam a usar o salário principal do respectivo perfil e mês. Nenhum lançamento financeiro, data, status, perfil, valor ou identificador é apagado pela migração. Cada store tem chave primária `id`; os lançamentos incluem `profileId`, `createdAt`, `updatedAt`, `version` e `origin` quando aplicável.
 
 | Store | Finalidade | Índices principais |
 |---|---|---|
@@ -81,11 +82,13 @@ Valores monetários são inteiros em centavos. `R$ 32,50` é armazenado como `32
 
 ### Origem da renda
 
-Gastos avulsos e ocorrências de gastos fixos podem usar o salário, uma receita adicional específica ou uma divisão exata entre várias rendas. As parcelas ficam em `fundingAllocations`; a soma precisa ser igual ao valor do gasto. O aplicativo calcula valor original, utilizado, disponível e percentual de uso de cada renda.
+Gastos avulsos e ocorrências de gastos fixos usam o salário principal por padrão. Também podem usar uma receita adicional específica, uma divisão exata entre várias rendas ou, mediante confirmação, a opção avançada **Não descontar de nenhuma renda**. As parcelas ficam em `fundingAllocations`; a soma precisa ser igual ao valor do gasto. Um vínculo salarial é criado mesmo quando o salário daquele mês ainda não foi informado, permitindo que o saldo apareça negativo provisoriamente.
 
-Em uma recorrência, a escolha exclusiva do salário é repetida nos próximos meses e ajustada ao valor da ocorrência. Receitas adicionais são lançamentos específicos, portanto escolhas que as utilizam valem somente para a ocorrência daquele mês; os meses seguintes ficam sem origem até serem definidos.
+Em uma recorrência, a escolha exclusiva do salário é repetida nos próximos meses e ajustada ao valor da ocorrência. Receitas adicionais são lançamentos específicos, portanto escolhas que as utilizam valem somente para a ocorrência daquele mês; nos meses seguintes, o salário volta a ser a origem padrão. A migração é idempotente: vínculos existentes com receitas adicionais ou divisões não são alterados.
 
 Se o valor utilizado ultrapassar a renda disponível, o aplicativo avisa e exige uma segunda confirmação, mas permite salvar quando o excesso for intencional.
+
+O resumo mensal e os relatórios mostram salário previsto e recebido, parcelas pagas e pendentes vinculadas ao salário, saldo e percentual comprometido. As outras receitas exibem total, uso, disponibilidade e percentual, com detalhamento individual. Em gastos divididos, cada bloco contabiliza somente a parcela correspondente, sem duplicar o valor total do gasto.
 
 ### Recorrências e histórico
 
@@ -93,7 +96,11 @@ Cada ocorrência fixa usa a chave única `recurringId:mês`. Essa restrição ex
 
 O dia do vencimento pode ficar vazio. Nesse caso, a ocorrência continua no mês de referência, aparece como **Sem vencimento**, não recebe uma data artificial e pode ser marcada como paga normalmente.
 
+As datas inicial e final são interpretadas pelo mês de referência. A data final é inclusiva: uma recorrência encerrada em qualquer dia de dezembro continua válida em dezembro e deixa de gerar ou entrar nos totais a partir de janeiro. Ao antecipar o encerramento, ocorrências pendentes fora do novo período são removidas; registros pagos são preservados no banco e nos backups, mas não entram nas estatísticas de meses inválidos. Remover ou ampliar a data final volta a permitir a geração dos meses válidos.
+
 Editar a recorrência muda os próximos meses ainda não gerados. A opção **Aplicar valores também à ocorrência do mês selecionado** altera a cópia atual. Ocorrências históricas permanecem independentes. Excluir uma recorrência não apaga ocorrências já geradas.
+
+Na tela de gastos fixos, **Editar somente este mês** altera apenas a ocorrência mensal. **Editar gasto fixo completo** abre a regra da recorrência, incluindo período, origem do dinheiro e estado ativo.
 
 ### Regras financeiras
 
@@ -119,6 +126,8 @@ python -m http.server 8080
 Depois abra `http://localhost:8080/controle-financeiro/`, ajustando o caminho conforme a pasta em que o servidor foi iniciado. Para executar os testes, abra `http://localhost:8080/controle-financeiro/tests/`.
 
 Service Worker e instalação PWA funcionam em `localhost` ou em HTTPS. Depois de editar arquivos em produção, atualize `CACHE_VERSION` em `sw.js`; o aplicativo avisará quando a nova versão estiver pronta e só trocará após confirmação.
+
+A versão atual do cache é `controle-financeiro-v4.0.0`. Ela inclui `js/funding.js`, remove caches anteriores na ativação e evita a mistura de JavaScript ou CSS de versões diferentes.
 
 ## Publicar gratuitamente no GitHub Pages
 
@@ -179,17 +188,26 @@ O executor em `tests/` verifica:
 - soma consolidada de perfis;
 - filtros combináveis e resumo de despesas;
 - propagação segura do salário em recorrências;
-- bloqueio de receitas adicionais em meses diferentes;
+- retorno ao salário padrão depois do mês de uma receita adicional específica;
 - filtros por origem da renda;
-- resumo de salário, receitas adicionais, divisões e gastos sem origem.
+- resumo de salário, receitas adicionais, divisões e gastos sem vínculo;
+- encerramento inclusivo das recorrências por mês;
+- limpeza segura de ocorrências futuras pendentes;
+- preservação de ocorrências pagas;
+- salário padrão para gastos, recorrências e ocorrências;
+- divisão exata entre salário e receita adicional;
+- migração idempotente do banco e de backups antigos;
+- contabilização proporcional de cada origem.
 
-Abra `/tests/` pelo mesmo servidor local. O resultado esperado é `22 de 22 testes passaram`.
+Abra `/tests/` pelo mesmo servidor local. O resultado esperado é `36 de 36 testes passaram`.
 
 Os mesmos testes podem ser executados diretamente com Node.js usando `node tests/run-node.mjs`.
 
 ## Compatibilidade e limites
 
 Prioriza versões modernas de Chrome, Edge, Firefox, Safari e navegadores móveis. O botão de instalação depende do suporte do navegador. IndexedDB é obrigatório; se ele estiver desativado ou indisponível, a interface mostrará uma mensagem de erro. Os perfis ficam no mesmo navegador e não sincronizam entre dispositivos. A aplicação não inclui investimentos, juros, parcelamento de fatura ou integração bancária.
+
+Em telas de até 900 px, o cabeçalho usa duas linhas, a navegação principal fica fixa na parte inferior e respeita a área segura do aparelho. Em telas de até 680 px, tabelas viram cards com ações de toque; indicadores usam duas colunas e passam para uma coluna somente abaixo de 350 px. Os filtros dos relatórios ficam em um painel expansível com contador de filtros ativos. Gráficos usam `devicePixelRatio`, `ResizeObserver` e legendas externas para manter a leitura ao girar a tela.
 
 ## Licença
 
